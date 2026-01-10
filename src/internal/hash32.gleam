@@ -1,8 +1,6 @@
 import gleam/bit_array
 
 /// A 32-byte hash value stored in little-endian byte order.
-///
-/// The internal representation is always exactly 32 bytes in little-endian order.
 pub opaque type Hash32 {
   Hash32(bytes_le: BitArray)
 }

@@ -1,0 +1,42 @@
+name: test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        target: [erlang, javascript]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node (JS target only)
+        if: matrix.target == 'javascript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.12.0"
+
+      - name: Setup BEAM
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.2"
+          gleam-version: "1.14.0"
+          rebar3-version: "3.25.1"
+          version-type: strict
+
+      - name: Run tests
+        run: |
+          gleam deps download
+          if [ "${{ matrix.target }}" = "javascript" ]; then
+            gleam test --target javascript
+          else
+            gleam test --target erlang
+          fi
+          gleam format --check src test

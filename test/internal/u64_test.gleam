@@ -2,9 +2,9 @@ import internal/u64.{InvalidByteCount}
 
 const max_u64_bytes = <<0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF>>
 
-// from_le_bytes
+// from_bytes_le
 
-pub fn from_bytes_le_returns_error_when_input_not_eight_bytes_test() {
+pub fn from_bytes_le_returns_error_when_input_not_8_bytes_test() {
   assert Error(InvalidByteCount(0)) == u64.from_bytes_le(<<>>)
 
   assert Error(InvalidByteCount(7))
@@ -14,7 +14,7 @@ pub fn from_bytes_le_returns_error_when_input_not_eight_bytes_test() {
     == u64.from_bytes_le(<<1, 0, 0, 0, 0, 0, 0, 0, 0>>)
 }
 
-pub fn from_bytes_le_returns_ok_when_input_is_eight_bytes_test() {
+pub fn from_bytes_le_returns_ok_when_input_is_8_bytes_test() {
   let assert Ok(_) = u64.from_bytes_le(<<1, 0, 0, 0, 0, 0, 0, 0>>)
 }
 

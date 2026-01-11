@@ -1,7 +1,8 @@
 import gleam/option.{type Option}
 import internal/compact_size
 import internal/hash32.{type Hash32}
-import internal/reader
+import internal/hex
+import internal/reader.{type Reader}
 
 /// A Bitcoin transaction.
 ///
@@ -137,6 +138,24 @@ pub opaque type WtxId {
   WtxId(Hash32)
 }
 
+/// An error that occurred while decoding a Bitcoin transaction.
+///
+/// This error type distinguishes between failures that occur during hex-to-bytes
+/// conversion and failures that occur during transaction parsing.
+pub type DecodeError {
+  /// The hexadecimal string could not be converted to bytes.
+  ///
+  /// This occurs before any transaction parsing begins, typically due to an
+  /// odd-length hex string or the presence of invalid hexadecimal characters.
+  HexToBytesFailed(hex.HexToBytesError)
+
+  /// The byte sequence could not be parsed as a Bitcoin transaction.
+  ///
+  /// This wraps a `ParseError` containing details about what went wrong during
+  /// the transaction parsing phase.
+  ParseFailed(ParseError)
+}
+
 /// An error that occurred while parsing a Bitcoin transaction.
 ///
 /// This opaque type contains details about what went wrong during parsing,
@@ -185,17 +204,6 @@ pub type ParseErrorKind {
   ///
   /// This should be used sparingly and primarily for truly exceptional cases.
   Other(message: String)
-  // InvalidFixedBytesLength may come in handy if/when I decide to parse script/witness contents
-  // /// A fixed-size byte field did not match the expected length.
-  // ///
-  // /// The bytes were successfully read from well-formed input, but are rejected
-  // /// because their length does not match the fixed-width requirement for this
-  // /// field. This reflects a parser-enforced constraint on the field’s structure,
-  // /// even when the surrounding serialized data is otherwise valid.
-  // ///
-  // /// `field` identifies the logical field being validated, `got` is the number of
-  // /// bytes present, and `expected` is the required number of bytes.
-  // InvalidFixedBytesLength(field: String, got: Int, expected: Int)
 }
 
 /// Contextual information about where in the transaction structure a parsing error occurred.

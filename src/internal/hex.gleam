@@ -39,7 +39,7 @@ pub fn hex_to_bytes(hex: String) -> Result(BitArray, HexToBytesError) {
   hex
   // Split hex string into individual characters
   |> string.to_graphemes
-  // Group into pairs: ["a", "b", "c", "d"] -> [["a", "b"], ["c", "d"]]
+  // Group into pairs: ["a", "b", "c", "d"] -> [#("a", "b"), #("c","d")]
   |> list.sized_chunk(2)
   |> list.try_map(fn(chunk) {
     case chunk {
@@ -47,7 +47,7 @@ pub fn hex_to_bytes(hex: String) -> Result(BitArray, HexToBytesError) {
       _ -> Error(OddLength)
     }
   })
-  // Associate each pair with it's index ["a", "b", "c", "d"] -> [#(0, "a", "b"), #(1, "c","d")]
+  // Associate each pair with it's index: [#("a", "b"), #("c","d")] -> [#(0, "a", "b"), #(1, "c","d")]
   |> result.map(
     list.index_map(_, fn(pair, i) {
       let #(hi, low) = pair
@@ -57,9 +57,9 @@ pub fn hex_to_bytes(hex: String) -> Result(BitArray, HexToBytesError) {
   // Convert each pair to a byte
   |> result.try(list.try_map(_, parse_hex_pair))
   // Pack all bytes into a BitArray
-  |> result.map(fn(bytes) {
-    list.fold(bytes, <<>>, fn(acc, byte) { <<acc:bits, byte:int-size(8)>> })
-  })
+  |> result.map(
+    list.fold(_, <<>>, fn(acc, byte) { <<acc:bits, byte:int-size(8)>> }),
+  )
 }
 
 /// Converts a pair of hex characters into a single byte (0..255).

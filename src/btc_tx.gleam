@@ -196,6 +196,20 @@ pub type ParseErrorKind {
   /// that violates Bitcoin's canonical serialization rules.
   CompactSizeError(compact_size.CompactSizeError)
 
+  /// The remaining bytes are insufficient to encode even one transaction input.
+  ///
+  /// At least `min_txin_size` bytes are required to encode a single transaction
+  /// input, but only `remaining` bytes were available. This indicates that the
+  /// transaction is truncated or structurally invalid, and no positive `vin_count`
+  /// can be satisfied.
+  InsufficientBytesForInputs(remaining: Int, min_txin_size: Int)
+
+  /// A decoded integer value exceeds the range representable by the runtime.
+  ///
+  /// This typically occurs when converting a 64-bit unsigned value to a host
+  /// integer type. The original value is preserved as a string for diagnostics.
+  IntegerOutOfRange(String)
+
   /// A decoded numeric value fell outside the allowed range for the given field.
   ///
   /// The value was successfully decoded from well-formed input, but is rejected
@@ -207,7 +221,7 @@ pub type ParseErrorKind {
   /// value, and `min` / `max` define the permitted inclusive range.
   InvalidValueRange(
     field: String,
-    value: String,
+    value: Int,
     min: Option(Int),
     max: Option(Int),
   )
@@ -382,33 +396,50 @@ fn validate_vin_count(
   let max_inputs_policy = 100_000
   let min_txin_size = 41
 
+  let remaining = reader.bytes_remaining(reader)
+
   // Upper bound implied by remaining bytes (each input is at least 41 bytes)
-  let max_inputs_by_bytes = reader.bytes_remaining(reader) / min_txin_size
+  let max_inputs_by_bytes = remaining / min_txin_size
 
   // Final max is the stricter of policy vs structural
   let max_inputs = int.min(max_inputs_by_bytes, max_inputs_policy)
 
-  let vin_count_error = fn() {
-    InvalidValueRange(
-      "vin_count",
-      u64.to_string(vin_count),
-      Some(1),
-      Some(max_inputs),
-    )
+  let mk_err = fn(kind: ParseErrorKind) {
+    kind
     |> new_parse_error(reader)
     |> with_contexts([Field("vin_count"), ..ctx])
     |> ParseFailed
   }
 
-  use vin_count <- result.try(
+  // Convert U64 -> Int, but distinguish "cannot represent" from "range invalid"
+  use vin_count_int <- result.try(
     vin_count
     |> u64.to_int
-    |> result.map_error(fn(_) { vin_count_error() }),
+    |> result.map_error(fn(_) {
+      mk_err(IntegerOutOfRange(u64.to_string(vin_count)))
+    }),
   )
 
-  case vin_count < 1 || vin_count > max_inputs {
-    True -> Error(vin_count_error())
-    False -> Ok(vin_count)
+  // If there aren't enough remaining bytes to parse even one input, report that
+  // specifically (this is clearer than "range 1..0").
+  case remaining < min_txin_size {
+    True ->
+      Error(mk_err(InsufficientBytesForInputs(remaining:, min_txin_size:)))
+
+    False ->
+      case vin_count_int < 1 || vin_count_int > max_inputs {
+        True ->
+          Error(
+            mk_err(InvalidValueRange(
+              "vin_count",
+              vin_count_int,
+              Some(1),
+              Some(max_inputs),
+            )),
+          )
+
+        False -> Ok(vin_count_int)
+      }
   }
 }
 

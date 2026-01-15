@@ -1,4 +1,7 @@
-import btc_tx.{CompactSizeError, InvalidValueRange, ParseFailed, ReaderError}
+import btc_tx.{
+  CompactSizeError, InsufficientBytesForInputs, InvalidValueRange, ParseFailed,
+  ReaderError,
+}
 import gleam/option.{Some}
 import gleeunit
 import internal/compact_size
@@ -65,7 +68,7 @@ pub fn decode_does_not_misclassify_segwit_when_discriminator_is_truncated_test()
   assert btc_tx.parse_error_offset(parse_err) == 5
 
   assert btc_tx.parse_error_kind(parse_err)
-    == InvalidValueRange("vin_count", "0", Some(1), Some(0))
+    == InsufficientBytesForInputs(remaining: 0, min_txin_size: 41)
 }
 
 pub fn decode_does_not_misclassify_segwit_when_flag_is_not_01_test() {
@@ -79,5 +82,19 @@ pub fn decode_does_not_misclassify_segwit_when_flag_is_not_01_test() {
   assert btc_tx.parse_error_offset(parse_err) == 5
 
   assert btc_tx.parse_error_kind(parse_err)
-    == InvalidValueRange("vin_count", "0", Some(1), Some(0))
+    == InsufficientBytesForInputs(remaining: 1, min_txin_size: 41)
+}
+
+pub fn decode_returns_invalid_value_range_when_vin_count_zero_test() {
+  // Construct: version (4 bytes) + vin_count (CompactSize = 0x00) + 41 bytes
+  // of padding so that `remaining >= min_txin_size` and the validator
+  // produces an InvalidValueRange for vin_count == 0.
+  let tx = <<1:little-size(32), 0:size(8), 0:little-size(328)>>
+
+  let assert Error(ParseFailed(parse_err)) = btc_tx.decode(tx)
+
+  assert btc_tx.parse_error_offset(parse_err) == 5
+
+  assert btc_tx.parse_error_kind(parse_err)
+    == InvalidValueRange("vin_count", 0, Some(1), Some(1))
 }

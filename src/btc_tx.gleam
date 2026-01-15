@@ -1,8 +1,15 @@
-import gleam/option.{type Option}
+//// btc_tx provides facilities for parsing and modeling Bitcoin transaction data
+//// in a form suitable for inspection, analysis, and reference.
+
+import gleam/int
+import gleam/list
+import gleam/option.{type Option, Some}
+import gleam/result
 import internal/compact_size
 import internal/hash32.{type Hash32}
 import internal/hex
 import internal/reader.{type Reader}
+import internal/u64.{type U64}
 
 /// A Bitcoin transaction.
 ///
@@ -17,6 +24,9 @@ pub opaque type Transaction {
   /// transaction identifier (txid) from the full serialization.
   Legacy(
     /// The transaction version number.
+    /// 
+    /// Unknown or future version values are permitted by Bitcoin consensus
+    /// rules and are therefore not rejected by the decoder.
     version: Int,
     /// The list of transaction inputs.
     inputs: List(TxIn(Nil)),
@@ -33,6 +43,9 @@ pub opaque type Transaction {
   /// (full serialization including witness data).
   Segwit(
     /// The transaction version number.
+    /// 
+    /// Unknown or future version values are permitted by Bitcoin consensus
+    /// rules and are therefore not rejected by the decoder.
     version: Int,
     /// The list of transaction inputs, each with associated witness data.
     inputs: List(TxIn(List(WitnessItem))),
@@ -211,7 +224,7 @@ pub opaque type ParseContext {
   /// The error occurred while parsing the top-level transaction structure.
   ///
   /// This is typically added once at the outermost decode layer.
-  Transaction
+  Tx
 
   /// The error occurred while parsing the transaction’s input vector
   /// (the `vin` field).
@@ -243,4 +256,191 @@ pub opaque type ParseContext {
   /// fields such as `"version"`, `"sequence"`, `"lock_time"`, `"script_sig"`,
   /// or `"script_pubkey"`.
   Field(String)
+}
+
+pub fn parse_error_offset(err: ParseError) -> Int {
+  err.offset
+}
+
+pub fn parse_error_kind(err: ParseError) -> ParseErrorKind {
+  err.kind
+}
+
+fn new_parse_error(kind: ParseErrorKind, reader: Reader) -> ParseError {
+  ParseError(reader.get_offset(reader), kind:, ctx: [])
+}
+
+fn with_contexts(err: ParseError, ctx: List(ParseContext)) -> ParseError {
+  list.fold(ctx, err, with_context)
+}
+
+fn with_context(err: ParseError, ctx: ParseContext) -> ParseError {
+  ParseError(..err, ctx: [ctx, ..err.ctx])
+}
+
+pub fn get_version(tx: Transaction) -> Int {
+  tx.version
+}
+
+pub fn is_segwit(tx: Transaction) -> Bool {
+  case tx {
+    Legacy(..) -> False
+    Segwit(..) -> True
+  }
+}
+
+pub fn decode(bytes: BitArray) -> Result(Transaction, DecodeError) {
+  let reader = reader.new(bytes)
+
+  let tx_ctx = [Tx]
+  use #(reader, version) <- result.try(read_version(reader, tx_ctx))
+  use #(reader, is_segwit) <- result.try(detect_segwit(reader, tx_ctx))
+
+  let inputs_ctx = [Inputs, ..tx_ctx]
+  use #(reader, vin_count) <- result.try(read_vin_count(reader, inputs_ctx))
+  use vin_count <- result.try(validate_vin_count(reader, vin_count, inputs_ctx))
+
+  Ok(case is_segwit {
+    True -> Segwit(version:, inputs: [], outputs: [], lock_time: 0)
+    False -> Legacy(version:, inputs: [], outputs: [], lock_time: 0)
+  })
+}
+
+pub fn decode_hex(hex: String) -> Result(Transaction, DecodeError) {
+  case hex.hex_to_bytes(hex) {
+    Ok(bytes) -> decode(bytes)
+    Error(err) -> Error(HexToBytesFailed(err))
+  }
+}
+
+fn read_version(
+  reader: Reader,
+  ctx: List(ParseContext),
+) -> Result(#(Reader, Int), DecodeError) {
+  read_field(reader, reader.read_i32_le, "version", ctx)
+}
+
+fn detect_segwit(
+  reader: Reader,
+  ctx: List(ParseContext),
+) -> Result(#(Reader, Bool), DecodeError) {
+  reader
+  |> peek_segwit(ctx)
+  |> result.try(fn(is_segwit) {
+    let reader = case is_segwit {
+      True -> {
+        // safe to assert because we already peeked the next two bytes
+        let assert Ok(reader) = reader.skip_bytes(reader, 2)
+        reader
+      }
+      False -> reader
+    }
+
+    Ok(#(reader, is_segwit))
+  })
+}
+
+fn peek_segwit(
+  reader: Reader,
+  ctx: List(ParseContext),
+) -> Result(Bool, DecodeError) {
+  case reader.peek_bytes(reader, 2) {
+    Ok(bytes) -> {
+      let assert <<marker, flag>> = bytes
+      Ok(marker == 0x00 && flag == 0x01)
+    }
+
+    Error(err) ->
+      case err {
+        // Ambiguity-aware: do not fail the whole decode just because we couldn't
+        // look ahead. Let the later parsing produce a better contextual EOF.
+        reader.UnexpectedEof(..) -> Ok(False)
+
+        _ ->
+          err
+          |> ReaderError
+          |> new_parse_error(reader)
+          |> with_contexts([Field("segwit_discriminator"), ..ctx])
+          |> ParseFailed
+          |> Error
+      }
+  }
+}
+
+fn read_vin_count(
+  reader: Reader,
+  ctx: List(ParseContext),
+) -> Result(#(Reader, U64), DecodeError) {
+  read_compact_size_field(reader, "vin_count", ctx)
+}
+
+fn validate_vin_count(
+  reader: Reader,
+  vin_count: U64,
+  ctx: List(ParseContext),
+) -> Result(Int, DecodeError) {
+  let max_inputs_policy = 100_000
+  let min_txin_size = 41
+
+  // Upper bound implied by remaining bytes (each input is at least 41 bytes)
+  let max_inputs_by_bytes = reader.bytes_remaining(reader) / min_txin_size
+
+  // Final max is the stricter of policy vs structural
+  let max_inputs = int.min(max_inputs_by_bytes, max_inputs_policy)
+
+  let vin_count_error = fn() {
+    InvalidValueRange(
+      "vin_count",
+      u64.to_string(vin_count),
+      Some(1),
+      Some(max_inputs),
+    )
+    |> new_parse_error(reader)
+    |> with_contexts([Field("vin_count"), ..ctx])
+    |> ParseFailed
+  }
+
+  use vin_count <- result.try(
+    vin_count
+    |> u64.to_int
+    |> result.map_error(fn(_) { vin_count_error() }),
+  )
+
+  case vin_count < 1 || vin_count > max_inputs {
+    True -> Error(vin_count_error())
+    False -> Ok(vin_count)
+  }
+}
+
+fn read_field(
+  reader: Reader,
+  read_fn: fn(Reader) -> Result(#(Reader, a), reader.ReaderError),
+  field_name: String,
+  ctx: List(ParseContext),
+) -> Result(#(Reader, a), DecodeError) {
+  reader
+  |> read_fn
+  |> result.map_error(fn(err) {
+    err
+    |> ReaderError
+    |> new_parse_error(reader)
+    |> with_contexts([Field(field_name), ..ctx])
+    |> ParseFailed
+  })
+}
+
+fn read_compact_size_field(
+  reader: Reader,
+  field_name: String,
+  ctx: List(ParseContext),
+) -> Result(#(Reader, U64), DecodeError) {
+  reader
+  |> compact_size.read
+  |> result.map_error(fn(err) {
+    err
+    |> CompactSizeError
+    |> new_parse_error(reader)
+    |> with_contexts([Field(field_name), ..ctx])
+    |> ParseFailed
+  })
 }

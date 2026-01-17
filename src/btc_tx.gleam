@@ -303,7 +303,18 @@ pub fn is_segwit(tx: Transaction) -> Bool {
   }
 }
 
+pub type DecodePolicy {
+  DecodePolicy(max_vin_count: Int)
+}
+
 pub fn decode(bytes: BitArray) -> Result(Transaction, DecodeError) {
+  decode_with_policy(bytes, DecodePolicy(max_vin_count: 100_000))
+}
+
+pub fn decode_with_policy(
+  bytes: BitArray,
+  policy: DecodePolicy,
+) -> Result(Transaction, DecodeError) {
   let reader = reader.new(bytes)
 
   let tx_ctx = [Tx]
@@ -312,7 +323,12 @@ pub fn decode(bytes: BitArray) -> Result(Transaction, DecodeError) {
 
   let inputs_ctx = [Inputs, ..tx_ctx]
   use #(reader, vin_count) <- result.try(read_vin_count(reader, inputs_ctx))
-  use vin_count <- result.try(validate_vin_count(reader, vin_count, inputs_ctx))
+  use vin_count <- result.try(validate_vin_count(
+    reader,
+    vin_count,
+    policy.max_vin_count,
+    inputs_ctx,
+  ))
 
   Ok(case is_segwit {
     True -> Segwit(version:, inputs: [], outputs: [], lock_time: 0)
@@ -391,9 +407,9 @@ fn read_vin_count(
 fn validate_vin_count(
   reader: Reader,
   vin_count: U64,
+  max_vin_count_policy: Int,
   ctx: List(ParseContext),
 ) -> Result(Int, DecodeError) {
-  let max_inputs_policy = 100_000
   let min_txin_size = 41
 
   let remaining = reader.bytes_remaining(reader)
@@ -402,7 +418,7 @@ fn validate_vin_count(
   let max_inputs_by_bytes = remaining / min_txin_size
 
   // Final max is the stricter of policy vs structural
-  let max_inputs = int.min(max_inputs_by_bytes, max_inputs_policy)
+  let max_inputs = int.min(max_inputs_by_bytes, max_vin_count_policy)
 
   let mk_err = fn(kind: ParseErrorKind) {
     kind

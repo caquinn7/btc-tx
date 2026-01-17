@@ -1,6 +1,7 @@
 //// btc_tx provides facilities for parsing and modeling Bitcoin transaction data
 //// in a form suitable for inspection, analysis, and reference.
 
+import gleam/bool
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, Some}
@@ -285,11 +286,7 @@ fn new_parse_error(kind: ParseErrorKind, reader: Reader) -> ParseError {
 }
 
 fn with_contexts(err: ParseError, ctx: List(ParseContext)) -> ParseError {
-  list.fold(ctx, err, with_context)
-}
-
-fn with_context(err: ParseError, ctx: ParseContext) -> ParseError {
-  ParseError(..err, ctx: [ctx, ..err.ctx])
+  list.fold(ctx, err, fn(err, ctx) { ParseError(..err, ctx: [ctx, ..err.ctx]) })
 }
 
 pub fn get_version(tx: Transaction) -> Int {
@@ -411,16 +408,14 @@ fn validate_vin_count(
   ctx: List(ParseContext),
 ) -> Result(Int, DecodeError) {
   let min_txin_size = 41
-
   let remaining = reader.bytes_remaining(reader)
 
   // Upper bound implied by remaining bytes (each input is at least 41 bytes)
   let max_inputs_by_bytes = remaining / min_txin_size
-
   // Final max is the stricter of policy vs structural
   let max_inputs = int.min(max_inputs_by_bytes, max_vin_count_policy)
 
-  let mk_err = fn(kind: ParseErrorKind) {
+  let mk_err = fn(kind) {
     kind
     |> new_parse_error(reader)
     |> with_contexts([Field("vin_count"), ..ctx])
@@ -432,30 +427,25 @@ fn validate_vin_count(
     vin_count
     |> u64.to_int
     |> result.map_error(fn(_) {
-      mk_err(IntegerOutOfRange(u64.to_string(vin_count)))
+      vin_count
+      |> u64.to_string
+      |> IntegerOutOfRange
+      |> mk_err
     }),
   )
 
-  // If there aren't enough remaining bytes to parse even one input, report that
-  // specifically (this is clearer than "range 1..0").
-  case remaining < min_txin_size {
+  // If there aren't enough remaining bytes to parse even one input, report that specifically.
+  use <- bool.lazy_guard(remaining < min_txin_size, fn() {
+    Error(mk_err(InsufficientBytesForInputs(remaining:, min_txin_size:)))
+  })
+
+  case vin_count_int < 1 || vin_count_int > max_inputs {
     True ->
-      Error(mk_err(InsufficientBytesForInputs(remaining:, min_txin_size:)))
+      InvalidValueRange("vin_count", vin_count_int, Some(1), Some(max_inputs))
+      |> mk_err
+      |> Error
 
-    False ->
-      case vin_count_int < 1 || vin_count_int > max_inputs {
-        True ->
-          Error(
-            mk_err(InvalidValueRange(
-              "vin_count",
-              vin_count_int,
-              Some(1),
-              Some(max_inputs),
-            )),
-          )
-
-        False -> Ok(vin_count_int)
-      }
+    False -> Ok(vin_count_int)
   }
 }
 

@@ -1,6 +1,6 @@
 import btc_tx.{
-  CompactSizeError, DecodePolicy, InsufficientBytesForInputs, InvalidValueRange,
-  ParseFailed, ReaderError,
+  CompactSizeError, DecodePolicy, Field, Inputs, InsufficientBytesForInputs,
+  InvalidValueRange, ParseFailed, ReaderError, Tx,
 }
 import gleam/option.{Some}
 import gleeunit
@@ -51,6 +51,8 @@ pub fn decode_errors_when_input_shorter_than_4_bytes_test() {
 
   assert btc_tx.parse_error_kind(parse_err)
     == ReaderError(reader.UnexpectedEof(4, 3))
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Field("version")]
 }
 
 pub fn decode_does_not_misclassify_segwit_when_discriminator_is_missing_test() {
@@ -60,6 +62,8 @@ pub fn decode_does_not_misclassify_segwit_when_discriminator_is_missing_test() {
 
   assert btc_tx.parse_error_kind(parse_err)
     == CompactSizeError(compact_size.ReaderError(reader.UnexpectedEof(1, 0)))
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
 }
 
 pub fn decode_does_not_misclassify_segwit_when_discriminator_is_truncated_test() {
@@ -75,6 +79,8 @@ pub fn decode_does_not_misclassify_segwit_when_discriminator_is_truncated_test()
       remaining: 0,
       min_txin_size: min_txin_size_bytes,
     )
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
 }
 
 pub fn decode_does_not_misclassify_segwit_when_flag_is_not_01_test() {
@@ -110,6 +116,8 @@ pub fn decode_returns_invalid_value_range_when_vin_count_zero_test() {
 
   assert btc_tx.parse_error_kind(parse_err)
     == InvalidValueRange("vin_count", vin_count, Some(1), Some(1))
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
 }
 
 pub fn validate_vin_count_minimum_succeeds_test() {
@@ -170,6 +178,8 @@ pub fn validate_vin_count_exceeds_policy_error_test() {
 
   assert btc_tx.parse_error_kind(parse_err)
     == InvalidValueRange("vin_count", vin_count, Some(1), Some(2))
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
 }
 
 pub fn validate_vin_count_exceeds_structural_error_test() {
@@ -190,6 +200,8 @@ pub fn validate_vin_count_exceeds_structural_error_test() {
 
   assert btc_tx.parse_error_kind(parse_err)
     == InvalidValueRange("vin_count", vin_count, Some(1), Some(2))
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
 }
 
 pub fn validate_vin_count_structural_boundary_succeeds_test() {
@@ -226,6 +238,8 @@ pub fn validate_vin_count_policy_wins_over_structural_test() {
 
   assert btc_tx.parse_error_kind(parse_err)
     == InvalidValueRange("vin_count", vin_count, Some(1), Some(10))
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
 }
 
 // Two runtime-specific tests below. On JavaScript, `u64.to_int` fails for
@@ -264,6 +278,8 @@ pub fn validate_vin_count_uint_conversion_failure_js_test() {
 
   assert btc_tx.parse_error_kind(parse_err)
     == btc_tx.IntegerOutOfRange("18446744073709551615")
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
 }
 
 @target(erlang)
@@ -303,6 +319,8 @@ pub fn validate_vin_count_large_value_invalid_range_erlang_test() {
       Some(1),
       Some(1),
     )
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
 }
 
 pub fn validate_vin_count_insufficient_bytes_for_inputs_test() {
@@ -323,4 +341,6 @@ pub fn validate_vin_count_insufficient_bytes_for_inputs_test() {
       remaining: min_txin_size_bytes - 1,
       min_txin_size: min_txin_size_bytes,
     )
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
 }

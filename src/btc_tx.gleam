@@ -235,7 +235,7 @@ pub type ParseErrorKind {
 }
 
 /// Contextual information about where in the transaction structure a parsing error occurred.
-pub opaque type ParseContext {
+pub type ParseContext {
   /// The error occurred while parsing the top-level transaction structure.
   ///
   /// This is typically added once at the outermost decode layer.
@@ -279,6 +279,10 @@ pub fn parse_error_offset(err: ParseError) -> Int {
 
 pub fn parse_error_kind(err: ParseError) -> ParseErrorKind {
   err.kind
+}
+
+pub fn parse_error_ctx(err: ParseError) -> List(ParseContext) {
+  err.ctx
 }
 
 fn new_parse_error(kind: ParseErrorKind, reader: Reader) -> ParseError {

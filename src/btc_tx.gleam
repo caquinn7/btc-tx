@@ -12,6 +12,8 @@ import internal/hex
 import internal/reader.{type Reader}
 import internal/u64.{type U64}
 
+// ---- Transaction types ----
+
 /// A Bitcoin transaction.
 ///
 /// A transaction transfers value by consuming previously created outputs
@@ -151,6 +153,19 @@ pub opaque type TxId {
 pub opaque type WtxId {
   WtxId(Hash32)
 }
+
+pub fn get_version(tx: Transaction) -> Int {
+  tx.version
+}
+
+pub fn is_segwit(tx: Transaction) -> Bool {
+  case tx {
+    Legacy(..) -> False
+    Segwit(..) -> True
+  }
+}
+
+// ---- Error handling ----
 
 /// An error that occurred while decoding a Bitcoin transaction.
 ///
@@ -293,16 +308,72 @@ fn with_contexts(err: ParseError, ctx: List(ParseContext)) -> ParseError {
   list.fold(ctx, err, fn(err, ctx) { ParseError(..err, ctx: [ctx, ..err.ctx]) })
 }
 
-pub fn get_version(tx: Transaction) -> Int {
-  tx.version
+// ---- Context-threading parser combinators ----
+
+/// A parsing computation that threads both the `Reader` and `ParseContext`.
+///
+/// This allows us to use Gleam's `use` syntax to elegantly compose parsing
+/// operations while automatically managing context propagation.
+type Parser(a) =
+  fn(Reader, List(ParseContext)) -> Result(#(Reader, a), DecodeError)
+
+// -- Combinators: functions that combine or transform parsers
+
+/// Run a Parser computation with an initial reader and context.
+/// 
+/// Combinator: chains parsers together using `use` syntax.
+fn run_parse(
+  reader: Reader,
+  ctx: List(ParseContext),
+  parser: Parser(a),
+  next: fn(Reader, a) -> Result(b, DecodeError),
+) -> Result(b, DecodeError) {
+  use #(reader, value) <- result.try(parser(reader, ctx))
+  next(reader, value)
 }
 
-pub fn is_segwit(tx: Transaction) -> Bool {
-  case tx {
-    Legacy(..) -> False
-    Segwit(..) -> True
+/// Add a context layer to a parsing computation.
+///
+/// Combinator: wraps a Parser to prepend context to its context list.
+fn in_context(ctx: ParseContext, parser: Parser(a)) -> Parser(a) {
+  fn(reader, outer_ctx) { parser(reader, [ctx, ..outer_ctx]) }
+}
+
+// -- Parsers: functions that create parsers for specific data types
+
+/// Lift a reader operation into a Parser, adding error mapping.
+fn read_field(
+  read_fn: fn(Reader) -> Result(#(Reader, a), reader.ReaderError),
+) -> Parser(a) {
+  fn(reader, ctx) {
+    reader
+    |> read_fn
+    |> result.map_error(fn(err) {
+      err
+      |> ReaderError
+      |> new_parse_error(reader)
+      |> with_contexts(ctx)
+      |> ParseFailed
+    })
   }
 }
+
+/// Lift a compact_size read into a Parser, adding error mapping.
+fn read_compact_size() -> Parser(U64) {
+  fn(reader, ctx) {
+    reader
+    |> compact_size.read
+    |> result.map_error(fn(err) {
+      err
+      |> CompactSizeError
+      |> new_parse_error(reader)
+      |> with_contexts(ctx)
+      |> ParseFailed
+    })
+  }
+}
+
+// ---- Decoding functions ----
 
 pub type DecodePolicy {
   DecodePolicy(max_vin_count: Int)
@@ -317,19 +388,27 @@ pub fn decode_with_policy(
   policy: DecodePolicy,
 ) -> Result(Transaction, DecodeError) {
   let reader = reader.new(bytes)
-
   let tx_ctx = [Tx]
-  use #(reader, version) <- result.try(read_version(reader, tx_ctx))
-  use #(reader, is_segwit) <- result.try(detect_segwit(reader, tx_ctx))
 
-  let inputs_ctx = [Inputs, ..tx_ctx]
-  use #(reader, vin_count) <- result.try(read_vin_count(reader, inputs_ctx))
-  use vin_count <- result.try(validate_vin_count(
+  use reader, version <- run_parse(
     reader,
-    vin_count,
-    policy.max_vin_count,
-    inputs_ctx,
-  ))
+    tx_ctx,
+    in_context(Field("version"), read_field(reader.read_i32_le)),
+  )
+
+  use reader, is_segwit <- run_parse(reader, tx_ctx, detect_segwit())
+
+  use reader, vin_count_u64 <- run_parse(
+    reader,
+    tx_ctx,
+    in_context(Inputs, in_context(Field("vin_count"), read_compact_size())),
+  )
+
+  use reader, vin_count <- run_parse(
+    reader,
+    [Inputs, ..tx_ctx],
+    validate_vin_count(vin_count_u64, policy.max_vin_count),
+  )
 
   Ok(case is_segwit {
     True -> Segwit(version:, inputs: [], outputs: [], lock_time: 0)
@@ -344,20 +423,14 @@ pub fn decode_hex(hex: String) -> Result(Transaction, DecodeError) {
   }
 }
 
-fn read_version(
-  reader: Reader,
-  ctx: List(ParseContext),
-) -> Result(#(Reader, Int), DecodeError) {
-  read_field(reader, reader.read_i32_le, "version", ctx)
-}
+/// Detect whether this is a SegWit transaction by peeking at the marker/flag bytes.
+///
+/// Returns `True` if SegWit marker (0x00, 0x01) is present,`False` otherwise.
+/// Side effect: consumes the marker/flag bytes if SegWit is detected.
+fn detect_segwit() -> Parser(Bool) {
+  fn(reader, ctx) {
+    use reader, is_segwit <- run_parse(reader, ctx, peek_segwit())
 
-fn detect_segwit(
-  reader: Reader,
-  ctx: List(ParseContext),
-) -> Result(#(Reader, Bool), DecodeError) {
-  reader
-  |> peek_segwit(ctx)
-  |> result.try(fn(is_segwit) {
     let reader = case is_segwit {
       True -> {
         // safe to assert because we already peeked the next two bytes
@@ -368,120 +441,82 @@ fn detect_segwit(
     }
 
     Ok(#(reader, is_segwit))
-  })
+  }
 }
 
-fn peek_segwit(
-  reader: Reader,
-  ctx: List(ParseContext),
-) -> Result(Bool, DecodeError) {
-  case reader.peek_bytes(reader, 2) {
-    Ok(bytes) -> {
-      let assert <<marker, flag>> = bytes
-      Ok(marker == 0x00 && flag == 0x01)
+/// Peek ahead at the next two bytes to check for SegWit marker/flag.
+///
+/// Returns `True` if next bytes are 0x00 0x01, `False` on EOF or otherwise.
+fn peek_segwit() -> Parser(Bool) {
+  fn(reader, ctx) {
+    case reader.peek_bytes(reader, 2) {
+      Ok(bytes) -> {
+        let assert <<marker, flag>> = bytes
+        Ok(#(reader, marker == 0x00 && flag == 0x01))
+      }
+
+      Error(err) ->
+        case err {
+          // Ambiguity-aware: do not fail the whole decode just because we couldn't look ahead.
+          // Let the later parsing produce a better contextual EOF.
+          reader.UnexpectedEof(..) -> Ok(#(reader, False))
+
+          _ ->
+            err
+            |> ReaderError
+            |> new_parse_error(reader)
+            |> with_contexts([Field("segwit_discriminator"), ..ctx])
+            |> ParseFailed
+            |> Error
+        }
+    }
+  }
+}
+
+/// Validate and convert the vin_count from U64 to Int, checking structural and policy limits.
+fn validate_vin_count(vin_count: U64, max_vin_count_policy: Int) -> Parser(Int) {
+  fn(reader, ctx) {
+    let min_txin_size = 41
+    let remaining = reader.bytes_remaining(reader)
+
+    // Upper bound implied by remaining bytes (each input is at least 41 bytes)
+    let max_inputs_by_bytes = remaining / min_txin_size
+    // Final max is the stricter of policy vs structural
+    let max_inputs = int.min(max_inputs_by_bytes, max_vin_count_policy)
+
+    let decode_err = fn(kind) {
+      kind
+      |> new_parse_error(reader)
+      |> with_contexts([Field("vin_count"), ..ctx])
+      |> ParseFailed
     }
 
-    Error(err) ->
-      case err {
-        // Ambiguity-aware: do not fail the whole decode just because we couldn't
-        // look ahead. Let the later parsing produce a better contextual EOF.
-        reader.UnexpectedEof(..) -> Ok(False)
-
-        _ ->
-          err
-          |> ReaderError
-          |> new_parse_error(reader)
-          |> with_contexts([Field("segwit_discriminator"), ..ctx])
-          |> ParseFailed
-          |> Error
-      }
-  }
-}
-
-fn read_vin_count(
-  reader: Reader,
-  ctx: List(ParseContext),
-) -> Result(#(Reader, U64), DecodeError) {
-  read_compact_size_field(reader, "vin_count", ctx)
-}
-
-fn validate_vin_count(
-  reader: Reader,
-  vin_count: U64,
-  max_vin_count_policy: Int,
-  ctx: List(ParseContext),
-) -> Result(Int, DecodeError) {
-  let min_txin_size = 41
-  let remaining = reader.bytes_remaining(reader)
-
-  // Upper bound implied by remaining bytes (each input is at least 41 bytes)
-  let max_inputs_by_bytes = remaining / min_txin_size
-  // Final max is the stricter of policy vs structural
-  let max_inputs = int.min(max_inputs_by_bytes, max_vin_count_policy)
-
-  let mk_err = fn(kind) {
-    kind
-    |> new_parse_error(reader)
-    |> with_contexts([Field("vin_count"), ..ctx])
-    |> ParseFailed
-  }
-
-  // Convert U64 -> Int, but distinguish "cannot represent" from "range invalid"
-  use vin_count_int <- result.try(
-    vin_count
-    |> u64.to_int
-    |> result.map_error(fn(_) {
+    // Convert U64 -> Int, but distinguish "cannot represent" from "range invalid"
+    use vin_count_int <- result.try(
       vin_count
-      |> u64.to_string
-      |> IntegerOutOfRange
-      |> mk_err
-    }),
-  )
+      |> u64.to_int
+      |> result.map_error(fn(_) {
+        vin_count
+        |> u64.to_string
+        |> IntegerOutOfRange
+        |> decode_err
+      }),
+    )
 
-  // If there aren't enough remaining bytes to parse even one input, report that specifically.
-  use <- bool.lazy_guard(remaining < min_txin_size, fn() {
-    Error(mk_err(InsufficientBytesForInputs(remaining:, min_txin_size:)))
-  })
-
-  case vin_count_int < 1 || vin_count_int > max_inputs {
-    True ->
-      InvalidValueRange("vin_count", vin_count_int, Some(1), Some(max_inputs))
-      |> mk_err
+    // There aren't enough remaining bytes to parse even one input
+    use <- bool.lazy_guard(remaining < min_txin_size, fn() {
+      InsufficientBytesForInputs(remaining:, min_txin_size:)
+      |> decode_err
       |> Error
+    })
 
-    False -> Ok(vin_count_int)
+    case vin_count_int < 1 || vin_count_int > max_inputs {
+      True ->
+        InvalidValueRange("vin_count", vin_count_int, Some(1), Some(max_inputs))
+        |> decode_err
+        |> Error
+
+      False -> Ok(#(reader, vin_count_int))
+    }
   }
-}
-
-fn read_field(
-  reader: Reader,
-  read_fn: fn(Reader) -> Result(#(Reader, a), reader.ReaderError),
-  field_name: String,
-  ctx: List(ParseContext),
-) -> Result(#(Reader, a), DecodeError) {
-  reader
-  |> read_fn
-  |> result.map_error(fn(err) {
-    err
-    |> ReaderError
-    |> new_parse_error(reader)
-    |> with_contexts([Field(field_name), ..ctx])
-    |> ParseFailed
-  })
-}
-
-fn read_compact_size_field(
-  reader: Reader,
-  field_name: String,
-  ctx: List(ParseContext),
-) -> Result(#(Reader, U64), DecodeError) {
-  reader
-  |> compact_size.read
-  |> result.map_error(fn(err) {
-    err
-    |> CompactSizeError
-    |> new_parse_error(reader)
-    |> with_contexts([Field(field_name), ..ctx])
-    |> ParseFailed
-  })
 }

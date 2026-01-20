@@ -3,8 +3,9 @@
 
 import gleam/bool
 import gleam/int
-import gleam/list
+import gleam/list.{Continue, Stop}
 import gleam/option.{type Option, Some}
+import gleam/pair
 import gleam/result
 import internal/compact_size
 import internal/hash32.{type Hash32}
@@ -32,7 +33,7 @@ pub opaque type Transaction {
     /// rules and are therefore not rejected by the decoder.
     version: Int,
     /// The list of transaction inputs.
-    inputs: List(TxIn(Nil)),
+    inputs: List(TxIn),
     /// The list of transaction outputs.
     outputs: List(TxOut),
     /// The transaction lock time.
@@ -51,19 +52,31 @@ pub opaque type Transaction {
     /// rules and are therefore not rejected by the decoder.
     version: Int,
     /// The list of transaction inputs, each with associated witness data.
-    inputs: List(TxIn(List(WitnessItem))),
+    inputs: List(TxIn),
     /// The list of transaction outputs.
     outputs: List(TxOut),
     /// The transaction lock time.
     lock_time: Int,
+    witnesses: List(List(WitnessItem)),
   )
+}
+
+pub fn get_version(tx: Transaction) -> Int {
+  tx.version
+}
+
+pub fn is_segwit(tx: Transaction) -> Bool {
+  case tx {
+    Legacy(..) -> False
+    Segwit(..) -> True
+  }
 }
 
 /// A transaction input.
 ///
 /// An input references a previous transaction output and provides the data
 /// required to satisfy that output’s spending conditions.
-pub opaque type TxIn(witness) {
+pub opaque type TxIn {
   TxIn(
     /// The previous output being spent, or a coinbase marker.
     prev_out: PrevOut,
@@ -77,12 +90,30 @@ pub opaque type TxIn(witness) {
     /// Sequence numbers are used for relative lock-time semantics and
     /// transaction replacement rules.
     sequence: Int,
-    /// Witness data associated with this input.
-    ///
-    /// For legacy transactions this is `Nil`; for SegWit transactions this
-    /// is a list of witness stack items.
-    witness: witness,
   )
+}
+
+/// Get all transaction inputs in order.
+pub fn get_inputs(tx: Transaction) {
+  case tx {
+    Legacy(inputs:, ..) -> inputs
+    Segwit(inputs:, ..) -> inputs
+  }
+}
+
+/// Get the previous output reference from an input.
+pub fn input_prev_out(input: TxIn) -> PrevOut {
+  input.prev_out
+}
+
+/// Get the sequence number from an input.
+pub fn input_sequence(input: TxIn) -> Int {
+  input.sequence
+}
+
+/// Get the scriptSig from an input.
+pub fn input_script_sig(input: TxIn) -> ScriptBytes {
+  input.script_sig
 }
 
 /// A reference to a previous transaction output.
@@ -101,12 +132,54 @@ pub opaque type PrevOut {
   OutPoint(txid: TxId, vout: Int)
 }
 
+/// Check whether a previous output reference is a coinbase marker.
+///
+/// Returns `True` if this is a `Coinbase`  input (which does not reference any
+/// previous transaction output), `False` if it is a regular `OutPoint`.
+pub fn prev_out_is_coinbase(prev_out: PrevOut) -> Bool {
+  case prev_out {
+    Coinbase -> True
+    OutPoint(..) -> False
+  }
+}
+
+/// Get the transaction ID from a previous output reference.
+///
+/// For a regular `OutPoint`, returns the transaction ID of the referenced output.
+/// For a `Coinbase`  input, returns an all-zero hash.
+pub fn get_prev_out_txid(prev_out: PrevOut) -> TxId {
+  case prev_out {
+    Coinbase -> {
+      let assert Ok(hash32) = hash32.from_bytes_le(<<0:size(256)>>)
+      TxId(hash32)
+    }
+    OutPoint(txid:, ..) -> txid
+  }
+}
+
+/// Get the output index from a previous output reference.
+///
+/// For a regular `OutPoint`, returns the zero-based index of the output within
+/// the referenced transaction. For a `Coinbase` input, returns `0xFFFFFFFF` (the
+/// special sentinel value indicating no previous output).
+pub fn get_prev_out_vout(prev_out: PrevOut) -> Int {
+  case prev_out {
+    Coinbase -> 0xFFFFFFFF
+    OutPoint(vout:, ..) -> vout
+  }
+}
+
 /// Raw Bitcoin script bytes.
 ///
 /// This type represents an uninterpreted script as it appears on the wire.
 /// No validation or opcode parsing is performed at this level.
 pub opaque type ScriptBytes {
   ScriptBytes(bytes: BitArray)
+}
+
+/// Get the raw bytes from a `ScriptBytes`.
+pub fn script_bytes(script: ScriptBytes) -> BitArray {
+  script.bytes
 }
 
 /// A single witness stack item.
@@ -146,23 +219,21 @@ pub opaque type TxId {
   TxId(Hash32)
 }
 
+/// Convert a transaction ID to its raw byte representation.
+///
+/// Returns the 32 bytes of the transaction ID in little-endian byte order,
+/// as they would appear in Bitcoin transactions and on the wire.
+pub fn txid_to_bytes(txid: TxId) -> BitArray {
+  let TxId(hash32) = txid
+  hash32.to_bytes_le(hash32)
+}
+
 /// The witness transaction identifier (wtxid).
 ///
 /// This is the double SHA-256 hash of the transaction’s
 /// full serialization, including witness data.
 pub opaque type WtxId {
   WtxId(Hash32)
-}
-
-pub fn get_version(tx: Transaction) -> Int {
-  tx.version
-}
-
-pub fn is_segwit(tx: Transaction) -> Bool {
-  case tx {
-    Legacy(..) -> False
-    Segwit(..) -> True
-  }
 }
 
 // ---- Error handling ----
@@ -219,6 +290,13 @@ pub type ParseErrorKind {
   /// transaction is truncated or structurally invalid, and no positive `vin_count`
   /// can be satisfied.
   InsufficientBytesForInputs(remaining: Int, min_txin_size: Int)
+
+  /// The claimed scriptSig length exceeds the remaining bytes in the input.
+  ///
+  /// The scriptSig_len field claimed `claimed` bytes, but only `remaining` bytes
+  /// were available in the input. This indicates the transaction is truncated or
+  /// malformed.
+  InsufficientBytesForScriptSig(claimed: Int, remaining: Int)
 
   /// A decoded integer value exceeds the range representable by the runtime.
   ///
@@ -308,6 +386,23 @@ fn with_contexts(err: ParseError, ctx: List(ParseContext)) -> ParseError {
   list.fold(ctx, err, fn(err, ctx) { ParseError(..err, ctx: [ctx, ..err.ctx]) })
 }
 
+/// Build a DecodeError factory function for a specific field.
+///
+/// Returns a function that takes a ParseErrorKind and produces a DecodeError
+/// with the field context already applied.
+fn field_error_builder(
+  field_name: String,
+  reader: Reader,
+  ctx: List(ParseContext),
+) -> fn(ParseErrorKind) -> DecodeError {
+  fn(kind) {
+    kind
+    |> new_parse_error(reader)
+    |> with_contexts([Field(field_name), ..ctx])
+    |> ParseFailed
+  }
+}
+
 // ---- Context-threading parser combinators ----
 
 /// A parsing computation that threads both the `Reader` and `ParseContext`.
@@ -373,14 +468,46 @@ fn read_compact_size() -> Parser(U64) {
   }
 }
 
+/// Read a vector of items by repeatedly calling a parser for each index.
+///
+/// Returns items in the order they appear in the binary stream.
+fn read_vec(count: Int, read_one: fn(Int) -> Parser(a)) -> Parser(List(a)) {
+  fn(reader, ctx) {
+    use <- bool.guard(count <= 0, Ok(#(reader, [])))
+
+    0
+    |> list.range(count - 1)
+    |> list.fold_until(Ok(#(reader, [])), fn(acc, index) {
+      case acc {
+        Ok(#(current_reader, items)) -> {
+          case read_one(index)(current_reader, ctx) {
+            Ok(#(next_reader, item)) ->
+              Continue(Ok(#(next_reader, [item, ..items])))
+
+            Error(err) -> Stop(Error(err))
+          }
+        }
+
+        Error(_) -> Stop(acc)
+      }
+    })
+    |> result.map(pair.map_second(_, list.reverse))
+  }
+}
+
 // ---- Decoding functions ----
 
 pub type DecodePolicy {
-  DecodePolicy(max_vin_count: Int)
+  DecodePolicy(max_vin_count: Int, max_script_size: Int)
 }
 
+pub const default_policy = DecodePolicy(
+  max_vin_count: 100_000,
+  max_script_size: 10_000,
+)
+
 pub fn decode(bytes: BitArray) -> Result(Transaction, DecodeError) {
-  decode_with_policy(bytes, DecodePolicy(max_vin_count: 100_000))
+  decode_with_policy(bytes, default_policy)
 }
 
 pub fn decode_with_policy(
@@ -398,21 +525,31 @@ pub fn decode_with_policy(
 
   use reader, is_segwit <- run_parse(reader, tx_ctx, detect_segwit())
 
+  let inputs_ctx = [Inputs, ..tx_ctx]
+
   use reader, vin_count_u64 <- run_parse(
     reader,
-    tx_ctx,
-    in_context(Inputs, in_context(Field("vin_count"), read_compact_size())),
+    inputs_ctx,
+    in_context(Field("vin_count"), read_compact_size()),
   )
 
   use reader, vin_count <- run_parse(
     reader,
-    [Inputs, ..tx_ctx],
+    inputs_ctx,
     validate_vin_count(vin_count_u64, policy.max_vin_count),
   )
 
+  use reader, inputs <- run_parse(
+    reader,
+    inputs_ctx,
+    read_vec(vin_count, fn(index) {
+      in_context(Input(index), read_tx_in(policy.max_script_size))
+    }),
+  )
+
   Ok(case is_segwit {
-    True -> Segwit(version:, inputs: [], outputs: [], lock_time: 0)
-    False -> Legacy(version:, inputs: [], outputs: [], lock_time: 0)
+    True -> Segwit(version:, inputs:, outputs: [], lock_time: 0, witnesses: [])
+    False -> Legacy(version:, inputs:, outputs: [], lock_time: 0)
   })
 }
 
@@ -484,12 +621,7 @@ fn validate_vin_count(vin_count: U64, max_vin_count_policy: Int) -> Parser(Int) 
     // Final max is the stricter of policy vs structural
     let max_inputs = int.min(max_inputs_by_bytes, max_vin_count_policy)
 
-    let decode_err = fn(kind) {
-      kind
-      |> new_parse_error(reader)
-      |> with_contexts([Field("vin_count"), ..ctx])
-      |> ParseFailed
-    }
+    let decode_err = field_error_builder("vin_count", reader, ctx)
 
     // Convert U64 -> Int, but distinguish "cannot represent" from "range invalid"
     use vin_count_int <- result.try(
@@ -518,5 +650,125 @@ fn validate_vin_count(vin_count: U64, max_vin_count_policy: Int) -> Parser(Int) 
 
       False -> Ok(#(reader, vin_count_int))
     }
+  }
+}
+
+fn read_tx_in(max_script_size: Int) -> Parser(TxIn) {
+  fn(reader, ctx) {
+    use reader, prev_out <- run_parse(reader, ctx, read_prev_out())
+    use reader, script_sig <- run_parse(
+      reader,
+      ctx,
+      read_script_sig(max_script_size),
+    )
+    use reader, sequence <- run_parse(
+      reader,
+      ctx,
+      in_context(Field("sequence"), read_field(reader.read_u32_le)),
+    )
+
+    Ok(#(reader, TxIn(prev_out:, script_sig:, sequence:)))
+  }
+}
+
+fn read_prev_out() -> Parser(PrevOut) {
+  fn(reader, ctx) {
+    use reader, prev_txid_bytes <- run_parse(
+      reader,
+      ctx,
+      in_context(Field("prev_txid"), read_field(reader.read_bytes(_, 32))),
+    )
+
+    use reader, vout <- run_parse(
+      reader,
+      ctx,
+      in_context(Field("vout"), read_field(reader.read_u32_le)),
+    )
+
+    let prev_out = case prev_txid_bytes, vout {
+      <<0:size(256)>>, 0xFFFFFFFF -> Coinbase
+
+      _, _ -> {
+        // Safe: read_bytes(_, 32) guarantees exactly 32 bytes on success
+        let assert Ok(hash32) = hash32.from_bytes_le(prev_txid_bytes)
+        OutPoint(TxId(hash32), vout)
+      }
+    }
+
+    Ok(#(reader, prev_out))
+  }
+}
+
+fn read_script_sig(max_script_size: Int) -> Parser(ScriptBytes) {
+  fn(reader, ctx) {
+    use reader, script_sig_len <- run_parse(
+      reader,
+      ctx,
+      read_and_validate_script_length("scriptSig_len", max_script_size),
+    )
+
+    use reader, script_sig_bytes <- run_parse(
+      reader,
+      ctx,
+      in_context(
+        Field("scriptSig"),
+        read_field(reader.read_bytes(_, script_sig_len)),
+      ),
+    )
+
+    Ok(#(reader, ScriptBytes(script_sig_bytes)))
+  }
+}
+
+/// Read and validate a script length field.
+///
+/// Reads a CompactSize length, converts it to Int, validates it against
+/// max_script_size policy, and ensures sufficient bytes remain.
+fn read_and_validate_script_length(
+  field_name: String,
+  max_script_size: Int,
+) -> Parser(Int) {
+  fn(reader, ctx) {
+    let decode_err = field_error_builder(field_name, reader, ctx)
+
+    use reader, script_len <- run_parse(
+      reader,
+      ctx,
+      in_context(Field(field_name), read_compact_size()),
+    )
+
+    use script_len_int <- result.try(
+      script_len
+      |> u64.to_int
+      |> result.map_error(fn(_) {
+        script_len
+        |> u64.to_string
+        |> IntegerOutOfRange
+        |> decode_err
+      }),
+    )
+
+    use <- bool.lazy_guard(script_len_int > max_script_size, fn() {
+      InvalidValueRange(
+        field_name,
+        script_len_int,
+        Some(0),
+        Some(max_script_size),
+      )
+      |> decode_err
+      |> Error
+    })
+
+    let remaining = reader.bytes_remaining(reader)
+    use <- bool.lazy_guard(script_len_int > remaining, fn() {
+      InsufficientBytesForScriptSig(
+        claimed: script_len_int,
+        remaining: remaining,
+      )
+      |> decode_err
+      |> Error
+    })
+
+    Ok(#(reader, script_len_int))
   }
 }

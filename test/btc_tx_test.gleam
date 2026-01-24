@@ -1,7 +1,7 @@
 import btc_tx.{
   CompactSizeError, DecodePolicy, Field, Input, Inputs,
-  InsufficientBytesForInputs, InsufficientBytesForScriptSig, InvalidValueRange,
-  ParseFailed, ReaderError, Tx,
+  InsufficientBytesForInputs, InsufficientBytesForScript, InvalidValueRange,
+  Output, Outputs, ParseFailed, ReaderError, Tx,
 }
 import gleam/bit_array
 import gleam/option.{Some}
@@ -18,6 +18,8 @@ const legacy_v2_tx = "02000000019945a5a440f2d3712ff095cb1efefada1cc52e139defedb9
 const version1 = <<1:little-size(32)>>
 
 const min_txin_size_bytes = 41
+
+const min_txout_size_bytes = 9
 
 pub fn main() -> Nil {
   gleeunit.main()
@@ -131,12 +133,15 @@ pub fn validate_vin_count_minimum_succeeds_test() {
 
   let vin_count = 1
   let input_padding = <<0:little-size({ 1 * min_txin_size_bytes * 8 })>>
+  let lock_time = <<0:little-size(32)>>
 
   let assert Ok(_) =
     btc_tx.decode(<<
       version1:bits,
       compact_size(vin_count):bits,
       input_padding:bits,
+      build_minimal_output():bits,
+      lock_time:bits,
     >>)
 }
 
@@ -147,10 +152,17 @@ pub fn validate_vin_count_within_limits_succeeds_test() {
 
   let vin_count = 2
   let input_padding = <<0:little-size({ 2 * min_txin_size_bytes * 8 })>>
+  let lock_time = <<0:little-size(32)>>
 
   let assert Ok(_) =
     btc_tx.decode_with_policy(
-      <<version1:bits, compact_size(vin_count):bits, input_padding:bits>>,
+      <<
+        version1:bits,
+        compact_size(vin_count):bits,
+        input_padding:bits,
+        build_minimal_output():bits,
+        lock_time:bits,
+      >>,
       DecodePolicy(..btc_tx.default_policy, max_vin_count: 10),
     )
 }
@@ -162,10 +174,17 @@ pub fn validate_vin_count_equals_policy_succeeds_test() {
 
   let vin_count = 3
   let input_padding = <<0:little-size({ 3 * min_txin_size_bytes * 8 })>>
+  let lock_time = <<0:little-size(32)>>
 
   let assert Ok(_) =
     btc_tx.decode_with_policy(
-      <<version1:bits, compact_size(vin_count):bits, input_padding:bits>>,
+      <<
+        version1:bits,
+        compact_size(vin_count):bits,
+        input_padding:bits,
+        build_minimal_output():bits,
+        lock_time:bits,
+      >>,
       DecodePolicy(..btc_tx.default_policy, max_vin_count: 3),
     )
 }
@@ -221,10 +240,17 @@ pub fn validate_vin_count_structural_boundary_succeeds_test() {
 
   let vin_count = 2
   let input_padding = <<0:little-size({ vin_count * min_txin_size_bytes * 8 })>>
+  let lock_time = <<0:little-size(32)>>
 
   let assert Ok(_) =
     btc_tx.decode_with_policy(
-      <<version1:bits, compact_size(vin_count):bits, input_padding:bits>>,
+      <<
+        version1:bits,
+        compact_size(vin_count):bits,
+        input_padding:bits,
+        build_minimal_output():bits,
+        lock_time:bits,
+      >>,
       DecodePolicy(..btc_tx.default_policy, max_vin_count: 100),
     )
 }
@@ -352,7 +378,7 @@ pub fn validate_vin_count_insufficient_bytes_for_inputs_test() {
 
 // input structure parsing
 
-pub fn decode_parses_single_input_prev_out_test() {
+pub fn decode_parses_single_input_test() {
   let vin_count = compact_size(1)
 
   // Create a transaction with a single input with specific prev_out values
@@ -364,15 +390,23 @@ pub fn decode_parses_single_input_prev_out_test() {
   let input_bytes =
     build_input(prev_txid_bytes, vout, script_sig_bytes, sequence)
 
+  let lock_time = <<0:little-size(32)>>
+
   let assert Ok(tx) =
-    btc_tx.decode(<<version1:bits, vin_count:bits, input_bytes:bits>>)
+    btc_tx.decode(<<
+      version1:bits,
+      vin_count:bits,
+      input_bytes:bits,
+      build_minimal_output():bits,
+      lock_time:bits,
+    >>)
 
   // Verify we parsed exactly one input
   let inputs = btc_tx.get_inputs(tx)
   let assert [first_input] = inputs
 
   // Verify prev_out properties
-  let prev_out = btc_tx.input_prev_out(first_input)
+  let prev_out = btc_tx.get_input_prev_out(first_input)
 
   let actual_prev_out_txid_bytes =
     prev_out
@@ -383,13 +417,13 @@ pub fn decode_parses_single_input_prev_out_test() {
   assert btc_tx.get_prev_out_vout(prev_out) == vout
 
   // Verify sequence
-  assert btc_tx.input_sequence(first_input) == sequence
+  assert btc_tx.get_input_sequence(first_input) == sequence
 
   // Verify scriptSig
   let actual_script_sig_bytes =
     first_input
-    |> btc_tx.input_script_sig
-    |> btc_tx.script_bytes
+    |> btc_tx.get_input_script_sig
+    |> btc_tx.get_raw_script_bytes
 
   assert actual_script_sig_bytes == script_sig_bytes
 }
@@ -405,13 +439,21 @@ pub fn decode_parses_coinbase_input_test() {
   let input_bytes =
     build_input(prev_txid_bytes, vout, script_sig_bytes, sequence)
 
+  let lock_time = <<0:little-size(32)>>
+
   let assert Ok(tx) =
-    btc_tx.decode(<<version1:bits, vin_count:bits, input_bytes:bits>>)
+    btc_tx.decode(<<
+      version1:bits,
+      vin_count:bits,
+      input_bytes:bits,
+      build_minimal_output():bits,
+      lock_time:bits,
+    >>)
 
   let inputs = btc_tx.get_inputs(tx)
   let assert [first_input] = inputs
 
-  let prev_out = btc_tx.input_prev_out(first_input)
+  let prev_out = btc_tx.get_input_prev_out(first_input)
 
   assert btc_tx.prev_out_is_coinbase(prev_out)
 }
@@ -427,16 +469,24 @@ pub fn decode_parses_empty_scriptsig_test() {
   let input_bytes =
     build_input(prev_txid_bytes, vout, script_sig_bytes, sequence)
 
+  let lock_time = <<0:little-size(32)>>
+
   let assert Ok(tx) =
-    btc_tx.decode(<<version1:bits, vin_count:bits, input_bytes:bits>>)
+    btc_tx.decode(<<
+      version1:bits,
+      vin_count:bits,
+      input_bytes:bits,
+      build_minimal_output():bits,
+      lock_time:bits,
+    >>)
 
   let inputs = btc_tx.get_inputs(tx)
   let assert [first_input] = inputs
 
   let actual_script_sig_bytes =
     first_input
-    |> btc_tx.input_script_sig
-    |> btc_tx.script_bytes
+    |> btc_tx.get_input_script_sig
+    |> btc_tx.get_raw_script_bytes
 
   assert actual_script_sig_bytes == <<>>
 }
@@ -464,6 +514,8 @@ pub fn decode_parses_multiple_inputs_test() {
   let in2_bytes = build_input(prev2_txid_bytes, vout2, sig2_bytes, seq2)
   let in3_bytes = build_input(prev3_txid_bytes, vout3, sig3_bytes, seq3)
 
+  let lock_time = <<0:little-size(32)>>
+
   let assert Ok(tx) =
     btc_tx.decode(<<
       version1:bits,
@@ -471,13 +523,15 @@ pub fn decode_parses_multiple_inputs_test() {
       in1_bytes:bits,
       in2_bytes:bits,
       in3_bytes:bits,
+      build_minimal_output():bits,
+      lock_time:bits,
     >>)
 
   let inputs = btc_tx.get_inputs(tx)
   let assert [i1, i2, i3] = inputs
 
   // input 1
-  let prev_out1 = btc_tx.input_prev_out(i1)
+  let prev_out1 = btc_tx.get_input_prev_out(i1)
 
   let actual_prev1_txid_bytes =
     prev_out1
@@ -486,11 +540,12 @@ pub fn decode_parses_multiple_inputs_test() {
 
   assert actual_prev1_txid_bytes == prev1_txid_bytes
   assert btc_tx.get_prev_out_vout(prev_out1) == vout1
-  assert btc_tx.input_sequence(i1) == seq1
-  assert btc_tx.script_bytes(btc_tx.input_script_sig(i1)) == sig1_bytes
+  assert btc_tx.get_input_sequence(i1) == seq1
+  assert btc_tx.get_raw_script_bytes(btc_tx.get_input_script_sig(i1))
+    == sig1_bytes
 
   // input 2
-  let prev_out2 = btc_tx.input_prev_out(i2)
+  let prev_out2 = btc_tx.get_input_prev_out(i2)
 
   let actual_prev2_txid_bytes =
     prev_out2
@@ -499,11 +554,12 @@ pub fn decode_parses_multiple_inputs_test() {
 
   assert actual_prev2_txid_bytes == prev2_txid_bytes
   assert btc_tx.get_prev_out_vout(prev_out2) == vout2
-  assert btc_tx.input_sequence(i2) == seq2
-  assert btc_tx.script_bytes(btc_tx.input_script_sig(i2)) == sig2_bytes
+  assert btc_tx.get_input_sequence(i2) == seq2
+  assert btc_tx.get_raw_script_bytes(btc_tx.get_input_script_sig(i2))
+    == sig2_bytes
 
   // input 3
-  let prev_out3 = btc_tx.input_prev_out(i3)
+  let prev_out3 = btc_tx.get_input_prev_out(i3)
 
   let actual_prev3_txid_bytes =
     prev_out3
@@ -512,8 +568,9 @@ pub fn decode_parses_multiple_inputs_test() {
 
   assert actual_prev3_txid_bytes == prev3_txid_bytes
   assert btc_tx.get_prev_out_vout(prev_out3) == vout3
-  assert btc_tx.input_sequence(i3) == seq3
-  assert btc_tx.script_bytes(btc_tx.input_script_sig(i3)) == sig3_bytes
+  assert btc_tx.get_input_sequence(i3) == seq3
+  assert btc_tx.get_raw_script_bytes(btc_tx.get_input_script_sig(i3))
+    == sig3_bytes
 }
 
 // scriptSig validation
@@ -571,7 +628,7 @@ pub fn decode_rejects_scriptsig_length_exceeds_remaining_bytes_test() {
     >>)
 
   assert btc_tx.parse_error_kind(parse_err)
-    == InsufficientBytesForScriptSig(claimed: 100, remaining: 10)
+    == InsufficientBytesForScript(claimed: 100, remaining: 10)
 
   assert btc_tx.parse_error_ctx(parse_err)
     == [Tx, Inputs, Input(0), Field("scriptSig_len")]
@@ -609,23 +666,511 @@ pub fn decode_returns_error_with_current_input_index_test() {
 
   // Verify the error occurred in the second input (index 1)
   assert btc_tx.parse_error_kind(parse_err)
-    == InsufficientBytesForScriptSig(claimed: 100, remaining: 4)
+    == InsufficientBytesForScript(claimed: 100, remaining: 4)
 
   assert btc_tx.parse_error_ctx(parse_err)
     == [Tx, Inputs, Input(1), Field("scriptSig_len")]
 }
 
-/// Build a minimal input with specific values
+// vout_count parsing and validation
+
+pub fn decode_returns_invalid_value_range_when_vout_count_zero_test() {
+  // Construct: version (4 bytes) + vin_count (1) + input (41 bytes) + vout_count (CompactSize = 0x00) + 9 bytes
+  // of padding so that `remaining >= min_txout_size` and the validator
+  // produces an InvalidValueRange for vout_count == 0.
+
+  let vout_count = 0
+  let output_padding = <<0:little-size({ 1 * min_txout_size_bytes * 8 })>>
+  let lock_time = <<0:little-size(32)>>
+
+  let assert Error(ParseFailed(parse_err)) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      compact_size(vout_count):bits,
+      output_padding:bits,
+      lock_time:bits,
+    >>)
+
+  assert btc_tx.parse_error_offset(parse_err) == 47
+
+  assert btc_tx.parse_error_kind(parse_err)
+    == InvalidValueRange("vout_count", vout_count, Some(1), Some(1))
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Outputs, Field("vout_count")]
+}
+
+pub fn validate_vout_count_minimum_succeeds_test() {
+  let lock_time = <<0:little-size(32)>>
+
+  let assert Ok(_) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      build_minimal_output():bits,
+      lock_time:bits,
+    >>)
+}
+
+pub fn validate_vout_count_within_limits_succeeds_test() {
+  // enforce a policy that permits at least 2 outputs
+
+  let vout_count = 2
+  let output1 = build_output(<<0:little-size(64)>>, <<>>)
+  let output2 = build_output(<<0:little-size(64)>>, <<>>)
+  let lock_time = <<0:little-size(32)>>
+
+  let assert Ok(_) =
+    btc_tx.decode_with_policy(
+      <<
+        version1:bits,
+        build_minimal_input():bits,
+        compact_size(vout_count):bits,
+        output1:bits,
+        output2:bits,
+        lock_time:bits,
+      >>,
+      DecodePolicy(..btc_tx.default_policy, max_vout_count: 10),
+    )
+}
+
+pub fn validate_vout_count_equals_policy_succeeds_test() {
+  // Pick a small policy (3). Create vout_count == 3 and supply 3 minimal outputs
+  // so that max_outputs_by_bytes >= policy and the policy is the active cap.
+  // should succeed when enforcing a policy that allows exactly 3 outputs
+
+  let vout_count = 3
+  let output1 = build_output(<<0:little-size(64)>>, <<>>)
+  let output2 = build_output(<<0:little-size(64)>>, <<>>)
+  let output3 = build_output(<<0:little-size(64)>>, <<>>)
+  let lock_time = <<0:little-size(32)>>
+
+  let assert Ok(_) =
+    btc_tx.decode_with_policy(
+      <<
+        version1:bits,
+        build_minimal_input():bits,
+        compact_size(vout_count):bits,
+        output1:bits,
+        output2:bits,
+        output3:bits,
+        lock_time:bits,
+      >>,
+      DecodePolicy(..btc_tx.default_policy, max_vout_count: 3),
+    )
+}
+
+pub fn validate_vout_count_exceeds_policy_error_test() {
+  // Use a small policy (2). Set vout_count == 3 and provide exactly
+  // 2 outputs (2 * 9 = 18 bytes) so max_outputs_by_bytes == 2 and
+  // the policy cap is active. Validator should reject vout_count == 3.
+
+  let vout_count = 3
+  let output1 = build_output(<<0:little-size(64)>>, <<>>)
+  let output2 = build_output(<<0:little-size(64)>>, <<>>)
+  let lock_time = <<0:little-size(32)>>
+
+  let assert Error(ParseFailed(parse_err)) =
+    btc_tx.decode_with_policy(
+      <<
+        version1:bits,
+        build_minimal_input():bits,
+        compact_size(vout_count):bits,
+        output1:bits,
+        output2:bits,
+        lock_time:bits,
+      >>,
+      DecodePolicy(..btc_tx.default_policy, max_vout_count: 2),
+    )
+
+  assert btc_tx.parse_error_kind(parse_err)
+    == InvalidValueRange("vout_count", vout_count, Some(1), Some(2))
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Outputs, Field("vout_count")]
+}
+
+pub fn validate_vout_count_structural_boundary_succeeds_test() {
+  // Provide exactly 2 outputs (2 * 9 = 18 bytes) so max_outputs_by_bytes == 2.
+  // Use a large policy (100) so the structural limit is the active cap,
+  // then assert vout_count == 2 succeeds.
+
+  let vout_count = 2
+  let output1 = build_output(<<0:little-size(64)>>, <<>>)
+  let output2 = build_output(<<0:little-size(64)>>, <<>>)
+  let lock_time = <<0:little-size(32)>>
+
+  let assert Ok(_) =
+    btc_tx.decode_with_policy(
+      <<
+        version1:bits,
+        build_minimal_input():bits,
+        compact_size(vout_count):bits,
+        output1:bits,
+        output2:bits,
+        lock_time:bits,
+      >>,
+      DecodePolicy(..btc_tx.default_policy, max_vout_count: 100),
+    )
+}
+
+pub fn validate_vout_count_insufficient_bytes_for_outputs_test() {
+  // Construct: version (4 bytes) + vin_count (1) + input (41 bytes) + vout_count (1) + 8 bytes
+  // of padding so that `remaining < min_txout_size` and the validator
+  // produces an InsufficientBytesForOutputs error.
+
+  let vout_count = 1
+  let output_padding = <<
+    0:little-size({ 1 * { min_txout_size_bytes - 1 } * 8 }),
+  >>
+
+  let assert Error(ParseFailed(parse_err)) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      compact_size(vout_count):bits,
+      output_padding:bits,
+    >>)
+
+  assert btc_tx.parse_error_kind(parse_err)
+    == btc_tx.InsufficientBytesForOutputs(
+      remaining: min_txout_size_bytes - 1,
+      min_txout_size: min_txout_size_bytes,
+    )
+
+  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Outputs, Field("vout_count")]
+}
+
+// output structure parsing
+
+pub fn decode_parses_single_output_test() {
+  // Create a transaction with a single output with specific properties
+  let value_satoshis = 100_000_000
+  let script_pubkey_bytes = <<0x76, 0xa9, 0x14>>
+  let output =
+    build_output(<<value_satoshis:little-size(64)>>, script_pubkey_bytes)
+  let lock_time = <<0:little-size(32)>>
+
+  let assert Ok(tx) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      compact_size(1):bits,
+      output:bits,
+      lock_time:bits,
+    >>)
+
+  // Verify we parsed exactly one output
+  let outputs = btc_tx.get_outputs(tx)
+  let assert [first_output] = outputs
+
+  // Verify output properties
+  let actual_value =
+    first_output
+    |> btc_tx.get_output_value
+    |> btc_tx.satoshis_to_int
+
+  assert actual_value == value_satoshis
+
+  let actual_script_pubkey_bytes =
+    first_output
+    |> btc_tx.get_output_script_pubkey
+    |> btc_tx.get_raw_script_bytes
+
+  assert actual_script_pubkey_bytes == script_pubkey_bytes
+}
+
+pub fn decode_parses_multiple_outputs_test() {
+  let vout_count = compact_size(3)
+
+  let value1 = <<0:little-size(64)>>
+  let value2 = <<100_000_000:little-size(64)>>
+  let value3 = <<50_000_000:little-size(64)>>
+
+  let script1_bytes = <<>>
+  let script2_bytes = <<0x01>>
+  let script3_bytes = <<0xAA, 0xBB>>
+
+  let out1_bytes = build_output(value1, script1_bytes)
+  let out2_bytes = build_output(value2, script2_bytes)
+  let out3_bytes = build_output(value3, script3_bytes)
+
+  let lock_time = <<0:little-size(32)>>
+
+  let assert Ok(tx) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      vout_count:bits,
+      out1_bytes:bits,
+      out2_bytes:bits,
+      out3_bytes:bits,
+      lock_time:bits,
+    >>)
+
+  let outputs = btc_tx.get_outputs(tx)
+  let assert [o1, o2, o3] = outputs
+
+  // output 1
+  let actual_value1 =
+    o1
+    |> btc_tx.get_output_value
+    |> btc_tx.satoshis_to_int
+
+  assert actual_value1 == 0
+
+  let actual_script1_bytes =
+    o1
+    |> btc_tx.get_output_script_pubkey
+    |> btc_tx.get_raw_script_bytes
+
+  assert actual_script1_bytes == script1_bytes
+
+  // output 2
+  let actual_value2 =
+    o2
+    |> btc_tx.get_output_value
+    |> btc_tx.satoshis_to_int
+
+  assert actual_value2 == 100_000_000
+
+  let actual_script2_bytes =
+    o2
+    |> btc_tx.get_output_script_pubkey
+    |> btc_tx.get_raw_script_bytes
+
+  assert actual_script2_bytes == script2_bytes
+
+  // output 3
+  let actual_value3 =
+    o3
+    |> btc_tx.get_output_value
+    |> btc_tx.satoshis_to_int
+
+  assert actual_value3 == 50_000_000
+
+  let actual_script3_bytes =
+    o3
+    |> btc_tx.get_output_script_pubkey
+    |> btc_tx.get_raw_script_bytes
+
+  assert actual_script3_bytes == script3_bytes
+}
+
+pub fn decode_parses_empty_scriptpubkey_test() {
+  // Create a transaction with an output that has empty scriptPubKey
+  let value_satoshis = 50_000_000
+  let script_pubkey_bytes = <<>>
+  let output =
+    build_output(<<value_satoshis:little-size(64)>>, script_pubkey_bytes)
+  let lock_time = <<0:little-size(32)>>
+
+  let assert Ok(tx) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      compact_size(1):bits,
+      output:bits,
+      lock_time:bits,
+    >>)
+
+  // Verify we parsed exactly one output
+  let outputs = btc_tx.get_outputs(tx)
+  let assert [first_output] = outputs
+
+  // Verify output properties
+  let actual_value =
+    first_output
+    |> btc_tx.get_output_value
+    |> btc_tx.satoshis_to_int
+
+  assert actual_value == value_satoshis
+
+  let actual_script_pubkey_bytes =
+    first_output
+    |> btc_tx.get_output_script_pubkey
+    |> btc_tx.get_raw_script_bytes
+
+  assert actual_script_pubkey_bytes == <<>>
+}
+
+// output value validation
+
+@target(javascript)
+pub fn decode_rejects_output_value_exceeding_int_range_js_test() {
+  // Create an output with value = u64 max (18446744073709551615), which exceeds
+  // JavaScript's MAX_SAFE_INTEGER and will fail u64.to_int conversion.
+
+  let vout_count = compact_size(1)
+
+  let value_u64_max = <<
+    255:size(8),
+    255:size(8),
+    255:size(8),
+    255:size(8),
+    255:size(8),
+    255:size(8),
+    255:size(8),
+    255:size(8),
+  >>
+
+  let script_pubkey_len = compact_size(0)
+
+  let output_bytes = <<
+    value_u64_max:bits,
+    script_pubkey_len:bits,
+  >>
+
+  let assert Error(ParseFailed(parse_err)) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      vout_count:bits,
+      output_bytes:bits,
+    >>)
+
+  assert btc_tx.parse_error_kind(parse_err)
+    == btc_tx.IntegerOutOfRange("18446744073709551615")
+
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [Tx, Outputs, btc_tx.Output(0), Field("value")]
+}
+
+pub fn decode_rejects_output_value_exceeding_max_money_test() {
+  // Create an output with a value that exceeds the max money supply.
+  // Use a value slightly larger than max_money (2_100_000_000_000_000 satoshis).
+
+  let vout_count = compact_size(1)
+  let value_satoshis = 2_100_000_000_000_001
+  let script_pubkey_bytes = <<>>
+  let output_bytes =
+    build_output(<<value_satoshis:little-size(64)>>, script_pubkey_bytes)
+
+  let assert Error(ParseFailed(parse_err)) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      vout_count:bits,
+      output_bytes:bits,
+    >>)
+
+  assert btc_tx.parse_error_kind(parse_err)
+    == InvalidValueRange(
+      "value",
+      value_satoshis,
+      Some(0),
+      Some(2_100_000_000_000_000),
+    )
+
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [Tx, Outputs, btc_tx.Output(0), Field("value")]
+}
+
+// scriptPubKey validation
+
+pub fn decode_rejects_scriptpubkey_exceeding_max_size_test() {
+  // Build a transaction with scriptPubKey_len = 10,001 (exceeds MAX_SCRIPT_SIZE of 10,000)
+
+  let vout_count = compact_size(1)
+
+  let value = <<0:little-size(64)>>
+  let script_pubkey = <<0:size({ 10_001 * 8 })>>
+
+  let output_bytes = build_output(value, script_pubkey)
+
+  let assert Error(ParseFailed(parse_err)) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      vout_count:bits,
+      output_bytes:bits,
+    >>)
+
+  assert btc_tx.parse_error_kind(parse_err)
+    == InvalidValueRange("scriptPubKey_len", 10_001, Some(0), Some(10_000))
+
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [Tx, Outputs, Output(0), Field("scriptPubKey_len")]
+}
+
+pub fn decode_parses_scriptpubkey_at_max_size_test() {
+  // Create a transaction with an output that has a scriptPubKey of exactly 10,000 bytes (MAX_SCRIPT_SIZE)
+  let value_satoshis = 75_000_000
+  let script_pubkey_bytes = <<0:size({ 10_000 * 8 })>>
+  let output =
+    build_output(<<value_satoshis:little-size(64)>>, script_pubkey_bytes)
+  let lock_time = <<0:little-size(32)>>
+
+  let assert Ok(tx) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      compact_size(1):bits,
+      output:bits,
+      lock_time:bits,
+    >>)
+
+  // Verify we parsed exactly one output
+  let outputs = btc_tx.get_outputs(tx)
+  let assert [first_output] = outputs
+
+  // Verify output properties
+  let actual_value =
+    first_output
+    |> btc_tx.get_output_value
+    |> btc_tx.satoshis_to_int
+
+  assert actual_value == value_satoshis
+
+  let actual_script_pubkey_bytes =
+    first_output
+    |> btc_tx.get_output_script_pubkey
+    |> btc_tx.get_raw_script_bytes
+
+  assert bit_array.byte_size(actual_script_pubkey_bytes) == 10_000
+}
+
+pub fn validate_scriptpubkey_insufficient_bytes_error_test() {
+  // Build a transaction where scriptPubKey_len claims 100 bytes but only 10 bytes remain
+  let vout_count = compact_size(1)
+
+  let value = <<0:little-size(64)>>
+  let script_pubkey_len = compact_size(100)
+
+  // Only provide 10 bytes of actual data (not enough for the claimed 100)
+  let partial_script_pubkey = <<1, 2, 3, 4, 5, 6, 7, 8, 9, 10>>
+
+  let output_bytes = <<
+    value:bits,
+    script_pubkey_len:bits,
+    partial_script_pubkey:bits,
+  >>
+
+  let assert Error(ParseFailed(parse_err)) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      vout_count:bits,
+      output_bytes:bits,
+    >>)
+
+  assert btc_tx.parse_error_kind(parse_err)
+    == InsufficientBytesForScript(claimed: 100, remaining: 10)
+
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [Tx, Outputs, Output(0), Field("scriptPubKey_len")]
+}
+
+// helpers
+
+/// Build an input with specific values
 fn build_input(
   prev_txid: BitArray,
   vout: Int,
   script_sig: BitArray,
   sequence: Int,
 ) -> BitArray {
-  let script_len = bit_array.byte_size(script_sig)
-
   let vout_bytes = <<vout:little-size(32)>>
-  let script_len = compact_size(script_len)
+  let script_len = compact_size(bit_array.byte_size(script_sig))
   let seq_bytes = <<sequence:little-size(32)>>
 
   <<
@@ -634,6 +1179,40 @@ fn build_input(
     script_len:bits,
     script_sig:bits,
     seq_bytes:bits,
+  >>
+}
+
+/// Build a minimal valid input (for use in output tests)
+fn build_minimal_input() -> BitArray {
+  let vin_count = compact_size(1)
+  let input = build_input(<<0:size(256)>>, 0, <<>>, 0)
+  <<vin_count:bits, input:bits>>
+}
+
+/// Build an output with specific values
+fn build_output(value: BitArray, script_pubkey: BitArray) -> BitArray {
+  let script_len =
+    script_pubkey
+    |> bit_array.byte_size
+    |> compact_size
+
+  <<
+    value:bits,
+    script_len:bits,
+    script_pubkey:bits,
+  >>
+}
+
+/// Build a minimal valid output section with vout_count, value, and empty scriptPubKey
+fn build_minimal_output() -> BitArray {
+  let vout_count = compact_size(1)
+  let value = <<0:little-size(64)>>
+  let script_pubkey_len = compact_size(0)
+
+  <<
+    vout_count:bits,
+    value:bits,
+    script_pubkey_len:bits,
   >>
 }
 

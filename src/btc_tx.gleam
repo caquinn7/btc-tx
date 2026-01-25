@@ -10,6 +10,7 @@ import gleam/result
 import internal/compact_size
 import internal/hash32.{type Hash32}
 import internal/hex
+import internal/i64
 import internal/reader.{type Reader}
 import internal/u64.{type U64}
 
@@ -57,6 +58,7 @@ pub opaque type Transaction {
     outputs: List(TxOut),
     /// The transaction lock time.
     lock_time: Int,
+    /// The witness stack for each input, indexed by input position.
     witnesses: List(List(WitnessItem)),
   )
 }
@@ -858,29 +860,29 @@ fn read_satoshis() -> Parser(Satoshis) {
       read_field("value", reader.read_bytes(_, 8)),
     )
 
-    let assert Ok(value_u64) = u64.from_bytes_le(value_bytes)
+    let assert Ok(value_i64) = i64.from_bytes_le(value_bytes)
 
     let value_err = make_field_error("value", reader, ctx)
 
     // This should never happen.
-    // The max possible amount of satoshis 2_100_000_000_000_000 (21_000_000 * 100_000_000)
+    // The max possible amount of satoshis 2_100_000_000_000_000 (21_000_000 * 100_000_000) (2.1 quadrillion)
     // is less than JavaScript's Number.MAX_SAFE_INTEGER 
     use value_int <- result.try(
-      value_u64
-      |> u64.to_int
+      value_i64
+      |> i64.to_int
       |> result.map_error(fn(_) {
-        value_u64
-        |> u64.to_string
+        value_i64
+        |> i64.to_string
         |> IntegerOutOfRange
         |> value_err
       }),
     )
 
-    let max_money = 2_100_000_000_000_000
+    let max_satoshis = 21_000_000 * 100_000_000
 
-    case value_int < 0 || value_int > max_money {
+    case value_int < 0 || value_int > max_satoshis {
       True ->
-        InvalidValueRange("value", value_int, Some(0), Some(max_money))
+        InvalidValueRange("value", value_int, Some(0), Some(max_satoshis))
         |> value_err
         |> Error
 

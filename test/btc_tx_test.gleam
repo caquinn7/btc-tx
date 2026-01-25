@@ -995,14 +995,14 @@ pub fn decode_parses_empty_scriptpubkey_test() {
 
 // output value validation
 
-@target(javascript)
-pub fn decode_rejects_output_value_exceeding_int_range_js_test() {
-  // Create an output with value = u64 max (18446744073709551615), which exceeds
-  // JavaScript's MAX_SAFE_INTEGER and will fail u64.to_int conversion.
+pub fn decode_rejects_output_value_negative_one_test() {
+  // Create an output with value = -1 (all bits set in signed i64 representation)
+  // Satoshi values must be non-negative, so this should be rejected.
 
   let vout_count = compact_size(1)
 
-  let value_u64_max = <<
+  // All bits set = -1 in two's complement signed representation
+  let value_negative_one = <<
     255:size(8),
     255:size(8),
     255:size(8),
@@ -1016,7 +1016,7 @@ pub fn decode_rejects_output_value_exceeding_int_range_js_test() {
   let script_pubkey_len = compact_size(0)
 
   let output_bytes = <<
-    value_u64_max:bits,
+    value_negative_one:bits,
     script_pubkey_len:bits,
   >>
 
@@ -1029,7 +1029,76 @@ pub fn decode_rejects_output_value_exceeding_int_range_js_test() {
     >>)
 
   assert btc_tx.parse_error_kind(parse_err)
-    == btc_tx.IntegerOutOfRange("18446744073709551615")
+    == InvalidValueRange("value", -1, Some(0), Some(2_100_000_000_000_000))
+
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [Tx, Outputs, btc_tx.Output(0), Field("value")]
+}
+
+@target(javascript)
+pub fn decode_rejects_output_value_min_i64_js_test() {
+  // Create an output with value = minimum i64 (-9223372036854775808)
+  // This value exceeds JavaScript's MIN_SAFE_INTEGER, so conversion fails.
+
+  let vout_count = compact_size(1)
+
+  // Minimum i64: sign bit set, all other bits clear
+  let value_min_i64 = <<0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>>
+
+  let script_pubkey_len = compact_size(0)
+
+  let output_bytes = <<
+    value_min_i64:bits,
+    script_pubkey_len:bits,
+  >>
+
+  let assert Error(ParseFailed(parse_err)) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      vout_count:bits,
+      output_bytes:bits,
+    >>)
+
+  assert btc_tx.parse_error_kind(parse_err)
+    == btc_tx.IntegerOutOfRange("-9223372036854775808")
+
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [Tx, Outputs, btc_tx.Output(0), Field("value")]
+}
+
+@target(erlang)
+pub fn decode_rejects_output_value_min_i64_erlang_test() {
+  // Create an output with value = minimum i64 (-9223372036854775808)
+  // On Erlang, conversion succeeds but validation rejects negative value.
+
+  let vout_count = compact_size(1)
+
+  // Minimum i64: sign bit set, all other bits clear
+  let value_min_i64 = <<0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>>
+
+  let script_pubkey_len = compact_size(0)
+
+  let output_bytes = <<
+    value_min_i64:bits,
+    script_pubkey_len:bits,
+  >>
+
+  let assert Error(ParseFailed(parse_err)) =
+    btc_tx.decode(<<
+      version1:bits,
+      build_minimal_input():bits,
+      vout_count:bits,
+      output_bytes:bits,
+    >>)
+
+  assert btc_tx.parse_error_kind(parse_err)
+    == InvalidValueRange(
+      "value",
+      -9_223_372_036_854_775_808,
+      Some(0),
+      Some(2_100_000_000_000_000),
+    )
 
   assert btc_tx.parse_error_ctx(parse_err)
     == [Tx, Outputs, btc_tx.Output(0), Field("value")]

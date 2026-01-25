@@ -1,6 +1,6 @@
-import { Result$Ok, Result$Error } from '../gleam.mjs';
+import { Result$Ok, Result$Error } from '../../gleam.mjs';
 
-export function u64LeToInt(bytes_le) {
+export function uint64LeToInt(bytes_le) {
   /*
   BitArray {
     bitSize: 64,
@@ -31,7 +31,7 @@ export function u64LeToInt(bytes_le) {
   return Result$Error(undefined);
 }
 
-export function u64LeToString(bytes_le) {
+export function uint64LeToString(bytes_le) {
   if (!bytes_le || bytes_le.byteSize !== 8) {
     throw new Error('Expected 8-byte BitArray');
   }
@@ -45,7 +45,7 @@ export function u64LeToString(bytes_le) {
   return x.toString(10);
 }
 
-export function i64LeToInt(bytes_le) {
+export function int64LeToInt(bytes_le) {
   if (!bytes_le || bytes_le.byteSize !== 8) {
     return Result$Error(undefined);
   }
@@ -64,7 +64,7 @@ export function i64LeToInt(bytes_le) {
   return Result$Error(undefined);
 }
 
-export function i64LeToString(bytes_le) {
+export function int64LeToString(bytes_le) {
   if (!bytes_le || bytes_le.byteSize !== 8) {
     throw new Error('Expected 8-byte BitArray');
   }

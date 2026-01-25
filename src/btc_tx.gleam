@@ -8,11 +8,11 @@ import gleam/option.{type Option, Some}
 import gleam/pair
 import gleam/result
 import internal/compact_size
+import internal/fixed_int/int64
+import internal/fixed_int/uint64.{type Uint64}
 import internal/hash32.{type Hash32}
 import internal/hex
-import internal/i64
 import internal/reader.{type Reader}
-import internal/u64.{type U64}
 
 // ---- Transaction types ----
 
@@ -489,7 +489,7 @@ fn read_field(
 }
 
 /// Lift a compact_size read into a Parser, adding error mapping and context wrapping.
-fn read_compact_size(field_name: String) -> Parser(U64) {
+fn read_compact_size(field_name: String) -> Parser(Uint64) {
   fn(reader, ctx) {
     reader
     |> compact_size.read
@@ -652,7 +652,7 @@ fn peek_segwit() -> Parser(Bool) {
   }
 }
 
-/// Validate and convert the vin_count from U64 to Int, checking structural and policy limits.
+/// Validate and convert the vin_count from Uint64 to Int, checking structural and policy limits.
 fn read_and_validate_vin_count(max_vin_count_policy: Int) -> Parser(Int) {
   fn(reader, ctx) {
     use reader, vin_count_u64 <- run_parse(
@@ -671,13 +671,13 @@ fn read_and_validate_vin_count(max_vin_count_policy: Int) -> Parser(Int) {
 
     let vin_count_err = make_field_error("vin_count", reader, ctx)
 
-    // Convert U64 -> Int, but distinguish "cannot represent" from "range invalid"
+    // Convert Uint64 -> Int, but distinguish "cannot represent" from "range invalid"
     use vin_count_int <- result.try(
       vin_count_u64
-      |> u64.to_int
+      |> uint64.to_int
       |> result.map_error(fn(_) {
         vin_count_u64
-        |> u64.to_string
+        |> uint64.to_string
         |> IntegerOutOfRange
         |> vin_count_err
       }),
@@ -768,7 +768,7 @@ fn read_prev_out() -> Parser(PrevOut) {
   }
 }
 
-/// Validate and convert the vout_count from U64 to Int, checking structural and policy limits.
+/// Validate and convert the vout_count from Uint64 to Int, checking structural and policy limits.
 fn read_and_validate_vout_count(max_vout_count_policy: Int) -> Parser(Int) {
   fn(reader, ctx) {
     use reader, vout_count_u64 <- run_parse(
@@ -787,13 +787,13 @@ fn read_and_validate_vout_count(max_vout_count_policy: Int) -> Parser(Int) {
 
     let vout_count_err = make_field_error("vout_count", reader, ctx)
 
-    // Convert U64 -> Int, but distinguish "cannot represent" from "range invalid"
+    // Convert Uint64 -> Int, but distinguish "cannot represent" from "range invalid"
     use vout_count_int <- result.try(
       vout_count_u64
-      |> u64.to_int
+      |> uint64.to_int
       |> result.map_error(fn(_) {
         vout_count_u64
-        |> u64.to_string
+        |> uint64.to_string
         |> IntegerOutOfRange
         |> vout_count_err
       }),
@@ -860,7 +860,7 @@ fn read_satoshis() -> Parser(Satoshis) {
       read_field("value", reader.read_bytes(_, 8)),
     )
 
-    let assert Ok(value_i64) = i64.from_bytes_le(value_bytes)
+    let assert Ok(value_i64) = int64.from_bytes_le(value_bytes)
 
     let value_err = make_field_error("value", reader, ctx)
 
@@ -869,10 +869,10 @@ fn read_satoshis() -> Parser(Satoshis) {
     // is less than JavaScript's Number.MAX_SAFE_INTEGER 
     use value_int <- result.try(
       value_i64
-      |> i64.to_int
+      |> int64.to_int
       |> result.map_error(fn(_) {
         value_i64
-        |> i64.to_string
+        |> int64.to_string
         |> IntegerOutOfRange
         |> value_err
       }),
@@ -928,10 +928,10 @@ fn read_and_validate_script_length(
 
     use script_len_int <- result.try(
       script_len
-      |> u64.to_int
+      |> uint64.to_int
       |> result.map_error(fn(_) {
         script_len
-        |> u64.to_string
+        |> uint64.to_string
         |> IntegerOutOfRange
         |> field_err
       }),

@@ -52,7 +52,7 @@ pub opaque type Transaction {
     /// Unknown or future version values are permitted by Bitcoin consensus
     /// rules and are therefore not rejected by the decoder.
     version: Int,
-    /// The list of transaction inputs, each with associated witness data.
+    /// The list of transaction inputs.
     inputs: List(TxIn),
     /// The list of transaction outputs.
     outputs: List(TxOut),
@@ -176,7 +176,8 @@ pub fn get_prev_out_vout(prev_out: PrevOut) -> Int {
 /// A single witness stack item.
 ///
 /// Witness items are arbitrary byte sequences provided as part of SegWit
-/// transaction inputs and are interpreted by script evaluation rules.
+/// transaction witness data. Their interpretation depends on the witness
+/// program being executed (e.g., public keys, signatures, or other data).
 pub opaque type WitnessItem {
   WitnessItem(bytes: BitArray)
 }
@@ -506,16 +507,20 @@ fn read_compact_size(field_name: String) -> Parser(Uint64) {
 /// Read a vector of items by repeatedly calling a parser for each index.
 ///
 /// Returns items in the order they appear in the binary stream.
-fn read_vec(count: Int, read_one: fn(Int) -> Parser(a)) -> Parser(List(a)) {
+fn read_vec(count: Int, create_parser: fn(Int) -> Parser(a)) -> Parser(List(a)) {
   fn(reader, ctx) {
     use <- bool.guard(count <= 0, Ok(#(reader, [])))
 
-    0
-    |> list.range(count - 1)
-    |> list.fold_until(Ok(#(reader, [])), fn(acc, index) {
+    let indices = list.range(0, count - 1)
+    let init = Ok(#(reader, []))
+
+    indices
+    |> list.fold_until(init, fn(acc, index) {
       case acc {
         Ok(#(current_reader, items)) -> {
-          case read_one(index)(current_reader, ctx) {
+          let item_parser = create_parser(index)
+
+          case item_parser(current_reader, ctx) {
             Ok(#(next_reader, item)) ->
               Continue(Ok(#(next_reader, [item, ..items])))
 
@@ -533,7 +538,7 @@ fn read_vec(count: Int, read_one: fn(Int) -> Parser(a)) -> Parser(List(a)) {
 // ---- Decoding functions ----
 
 pub type DecodePolicy {
-  DecodePolicy(max_vin_count: Int, max_script_size: Int, max_vout_count: Int)
+  DecodePolicy(max_vin_count: Int, max_vout_count: Int, max_script_size: Int)
 }
 
 pub const default_policy = DecodePolicy(
@@ -596,10 +601,10 @@ pub fn decode_with_policy(
 }
 
 pub fn decode_hex(hex: String) -> Result(Transaction, DecodeError) {
-  case hex.hex_to_bytes(hex) {
-    Ok(bytes) -> decode(bytes)
-    Error(err) -> Error(HexToBytesFailed(err))
-  }
+  hex
+  |> hex.hex_to_bytes
+  |> result.map_error(HexToBytesFailed)
+  |> result.try(decode)
 }
 
 /// Detect whether this is a SegWit transaction by peeking at the marker/flag bytes.
@@ -701,7 +706,10 @@ fn read_and_validate_vin_count(max_vin_count_policy: Int) -> Parser(Int) {
   }
 }
 
-fn read_tx_ins(vin_count: Int, max_script_size: Int) -> Parser(List(TxIn)) {
+fn read_tx_ins(
+  vin_count: Int,
+  max_script_size_policy: Int,
+) -> Parser(List(TxIn)) {
   // vin_count
   // ├─ TxIn #0
   // │    ├─ prev_txid (32 bytes)
@@ -713,11 +721,11 @@ fn read_tx_ins(vin_count: Int, max_script_size: Int) -> Parser(List(TxIn)) {
   // │    ├─ ...
   // └─ TxIn #(vin_count - 1)
   read_vec(vin_count, fn(index) {
-    in_context(Input(index), read_tx_in(max_script_size))
+    in_context(Input(index), read_tx_in(max_script_size_policy))
   })
 }
 
-fn read_tx_in(max_script_size: Int) -> Parser(TxIn) {
+fn read_tx_in(max_script_size_policy: Int) -> Parser(TxIn) {
   // │ prev_txid (32 bytes)
   // │ vout (4 bytes)
   // │ scriptSig_len (CompactSize)
@@ -728,7 +736,7 @@ fn read_tx_in(max_script_size: Int) -> Parser(TxIn) {
     use reader, script_sig <- run_parse(
       reader,
       ctx,
-      read_script("scriptSig", max_script_size),
+      read_script("scriptSig", max_script_size_policy),
     )
     use reader, sequence <- run_parse(
       reader,
@@ -822,7 +830,10 @@ fn read_and_validate_vout_count(max_vout_count_policy: Int) -> Parser(Int) {
   }
 }
 
-fn read_tx_outs(vout_count: Int, max_script_size: Int) -> Parser(List(TxOut)) {
+fn read_tx_outs(
+  vout_count: Int,
+  max_script_size_policy: Int,
+) -> Parser(List(TxOut)) {
   // vout_count
   // ├─ TxOut #0
   // │    ├─ value (8 bytes)
@@ -832,11 +843,11 @@ fn read_tx_outs(vout_count: Int, max_script_size: Int) -> Parser(List(TxOut)) {
   // │    ├─ ...
   // └─ TxOut #(vout_count - 1)
   read_vec(vout_count, fn(index) {
-    in_context(Output(index), read_tx_out(max_script_size))
+    in_context(Output(index), read_tx_out(max_script_size_policy))
   })
 }
 
-fn read_tx_out(max_script_size: Int) -> Parser(TxOut) {
+fn read_tx_out(max_script_size_policy: Int) -> Parser(TxOut) {
   // | value (8 bytes)
   // | scriptPubKey_len (CompactSize)
   // | scriptPubKey bytes
@@ -845,7 +856,7 @@ fn read_tx_out(max_script_size: Int) -> Parser(TxOut) {
     use reader, script_pubkey <- run_parse(
       reader,
       ctx,
-      read_script("scriptPubKey", max_script_size),
+      read_script("scriptPubKey", max_script_size_policy),
     )
 
     Ok(#(reader, TxOut(value:, script_pubkey:)))
@@ -891,14 +902,19 @@ fn read_satoshis() -> Parser(Satoshis) {
   }
 }
 
-fn read_script(field_name: String, max_script_size: Int) -> Parser(ScriptBytes) {
+fn read_script(
+  field_name: String,
+  max_script_size_policy: Int,
+) -> Parser(ScriptBytes) {
   fn(reader, ctx) {
     use reader, script_len <- run_parse(
       reader,
       ctx,
-      read_and_validate_script_length(field_name <> "_len", max_script_size),
+      read_and_validate_script_length(
+        field_name <> "_len",
+        max_script_size_policy,
+      ),
     )
-
     use reader, script_bytes <- run_parse(
       reader,
       ctx,
@@ -912,10 +928,10 @@ fn read_script(field_name: String, max_script_size: Int) -> Parser(ScriptBytes) 
 /// Read and validate a script length field.
 ///
 /// Reads a CompactSize length, converts it to Int, validates it against
-/// max_script_size policy, and ensures sufficient bytes remain.
+/// max_script_size_policy, and ensures sufficient bytes remain.
 fn read_and_validate_script_length(
   field_name: String,
-  max_script_size: Int,
+  max_script_size_policy: Int,
 ) -> Parser(Int) {
   fn(reader, ctx) {
     let field_err = make_field_error(field_name, reader, ctx)
@@ -937,12 +953,12 @@ fn read_and_validate_script_length(
       }),
     )
 
-    use <- bool.lazy_guard(script_len_int > max_script_size, fn() {
+    use <- bool.lazy_guard(script_len_int > max_script_size_policy, fn() {
       InvalidValueRange(
         field_name,
         script_len_int,
         Some(0),
-        Some(max_script_size),
+        Some(max_script_size_policy),
       )
       |> field_err
       |> Error

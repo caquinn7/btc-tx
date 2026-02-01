@@ -35,11 +35,25 @@ pub fn decode_legacy_full_tx_sets_version_and_is_segwit_false_test() {
   assert !btc_tx.is_segwit(result)
 }
 
+pub fn decode_legacy_tx_parses_lock_time_test() {
+  let assert Ok(result) = btc_tx.decode_hex(legacy_v1_tx)
+
+  // legacy_v1_tx has lock_time = 0 (ends with 00000000 in little-endian)
+  assert btc_tx.get_lock_time(result) == 0
+}
+
 pub fn decode_segwit_full_tx_sets_version_and_is_segwit_true_test() {
   let assert Ok(result) = btc_tx.decode_hex(segwit_v1_tx)
 
   assert btc_tx.get_version(result) == 1
   assert btc_tx.is_segwit(result)
+}
+
+pub fn decode_segwit_tx_parses_lock_time_test() {
+  let assert Ok(result) = btc_tx.decode_hex(segwit_v1_tx)
+
+  // segwit_v1_tx ends with "92040000" which in little-endian is 0x00000492 = 1170
+  assert btc_tx.get_lock_time(result) == 1170
 }
 
 pub fn decode_legacy_v2_parses_version_2_test() {
@@ -320,7 +334,7 @@ pub fn validate_vin_count_uint_conversion_failure_js_test() {
     == btc_tx.IntegerOutOfRange("18446744073709551615")
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [InTransaction, Inputs, Field("vin_count")]
+    == [InTransaction, Inputs, AtField("vin_count")]
 }
 
 @target(erlang)
@@ -1072,7 +1086,7 @@ pub fn decode_rejects_output_value_min_i64_js_test() {
     == btc_tx.IntegerOutOfRange("-9223372036854775808")
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [InTransaction, Outputs, AtOutput(0), Field("value")]
+    == [InTransaction, Outputs, AtOutput(0), AtField("value")]
 }
 
 @target(erlang)

@@ -84,6 +84,16 @@ pub fn get_outputs(tx: Transaction) -> List(TxOut) {
   tx.outputs
 }
 
+/// Get the lock time from a transaction.
+///
+/// Lock time specifies when this transaction is valid:
+/// - Values less than 500,000,000 are interpreted as block heights
+/// - Values greater than or equal to 500,000,000 are interpreted as Unix timestamps
+/// - A value of 0 means the transaction is valid immediately
+pub fn get_lock_time(tx: Transaction) -> Int {
+  tx.lock_time
+}
+
 /// Get the witness stacks from a SegWit transaction.
 ///
 /// Returns `Ok(witnesses)` if this is a `SegWit` transaction, or `Error(Nil)` if

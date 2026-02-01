@@ -59,7 +59,7 @@ pub opaque type Transaction {
     /// The transaction lock time.
     lock_time: Int,
     /// The witness stack for each input, indexed by input position.
-    witnesses: List(List(WitnessItem)),
+    witnesses: List(WitnessStack),
   )
 }
 
@@ -82,6 +82,17 @@ pub fn get_inputs(tx: Transaction) -> List(TxIn) {
 /// Get all transaction outputs in order.
 pub fn get_outputs(tx: Transaction) -> List(TxOut) {
   tx.outputs
+}
+
+/// Get the witness stacks from a SegWit transaction.
+///
+/// Returns `Ok(witnesses)` if this is a `SegWit` transaction, or `Error(Nil)` if
+/// it's a `Legacy` transaction (which has no witness data).
+pub fn get_witnesses(tx: Transaction) -> Result(List(WitnessStack), Nil) {
+  case tx {
+    Segwit(witnesses:, ..) -> Ok(witnesses)
+    Legacy(..) -> Error(Nil)
+  }
 }
 
 /// A transaction input.
@@ -173,13 +184,33 @@ pub fn get_prev_out_vout(prev_out: PrevOut) -> Int {
   }
 }
 
-/// A single witness stack item.
+/// A witness stack for a single transaction input.
 ///
-/// Witness items are arbitrary byte sequences provided as part of SegWit
-/// transaction witness data. Their interpretation depends on the witness
-/// program being executed (e.g., public keys, signatures, or other data).
+/// Each SegWit input has an associated witness stack containing the items
+/// needed to satisfy its spending conditions. The number and interpretation
+/// of these items depends on the witness program being executed.
+pub opaque type WitnessStack {
+  WitnessStack(List(WitnessItem))
+}
+
+/// Get the witness items from a witness stack.
+pub fn get_witness_items(stack: WitnessStack) -> List(WitnessItem) {
+  let WitnessStack(items) = stack
+  items
+}
+
+/// A single item from a witness stack.
+///
+/// Witness items are arbitrary byte sequences (e.g., public keys, signatures,
+/// or script data) whose meaning is determined by the witness program.
 pub opaque type WitnessItem {
-  WitnessItem(bytes: BitArray)
+  WitnessItem(BitArray)
+}
+
+/// Get the raw bytes from a witness item.
+pub fn get_witness_item_bytes(item: WitnessItem) -> BitArray {
+  let WitnessItem(bytes) = item
+  bytes
 }
 
 /// A transaction output.
@@ -217,12 +248,13 @@ pub fn get_output_script_pubkey(output: TxOut) -> ScriptBytes {
 /// This type represents an uninterpreted script as it appears on the wire.
 /// No validation or opcode parsing is performed at this level.
 pub opaque type ScriptBytes {
-  ScriptBytes(bytes: BitArray)
+  ScriptBytes(BitArray)
 }
 
 /// Get the raw bytes from a `ScriptBytes`.
 pub fn get_raw_script_bytes(script: ScriptBytes) -> BitArray {
-  script.bytes
+  let ScriptBytes(bytes) = script
+  bytes
 }
 
 /// A quantity of satoshis. (1 Bitcoin = 100,000,000 Satoshis)
@@ -311,27 +343,14 @@ pub type ParseErrorKind {
   /// that violates Bitcoin's canonical serialization rules.
   CompactSizeError(compact_size.CompactSizeError)
 
-  /// The remaining bytes are insufficient to encode even one transaction input.
+  /// The claimed or minimum required length exceeds the remaining bytes.
   ///
-  /// At least `min_txin_size` bytes are required to encode a single transaction input,
-  /// but only `remaining` bytes were available.
-  /// This indicates that the transaction is truncated or malformed,
-  /// and no positive `vin_count` can be satisfied.
-  InsufficientBytesForInputs(remaining: Int, min_txin_size: Int)
-
-  /// The remaining bytes are insufficient to encode even one transaction output.
+  /// This occurs when:
+  /// - A length-prefixed field (script, witness item) claims more bytes than remain
+  /// - A count field implies more items than could fit in remaining bytes
   ///
-  /// At least `min_txout_size` bytes are required to encode a single transaction output,
-  /// but only `remaining` bytes were available.
-  /// This indicates that the transaction is truncated or malformed,
-  /// and no positive `vout_count` can be satisfied.
-  InsufficientBytesForOutputs(remaining: Int, min_txout_size: Int)
-
-  /// The claimed script length exceeds the remaining bytes in the input.
-  ///
-  /// The decoded length claimed `claimed` bytes, but only `remaining` bytes
-  /// were available. This indicates the transaction is truncated or malformed.
-  InsufficientBytesForScript(claimed: Int, remaining: Int)
+  /// `claimed` is the number of bytes needed, `remaining` is what's available.
+  InsufficientBytes(claimed: Int, remaining: Int)
 
   /// A decoded integer value exceeds the range representable by the runtime.
   ///
@@ -367,7 +386,7 @@ pub type ParseContext {
   /// The error occurred while parsing the top-level transaction structure.
   ///
   /// This is typically added once at the outermost decode layer.
-  Tx
+  InTransaction
 
   /// The error occurred while parsing the transaction’s input vector
   /// (the `vin` field).
@@ -376,7 +395,7 @@ pub type ParseContext {
   /// The error occurred while parsing a specific input within the input vector.
   ///
   /// The wrapped `Int` is the zero-based index of the input being parsed.
-  Input(Int)
+  AtInput(Int)
 
   /// The error occurred while parsing the transaction’s output vector
   /// (the `vout` field).
@@ -385,20 +404,25 @@ pub type ParseContext {
   /// The error occurred while parsing a specific output within the output vector.
   ///
   /// The wrapped `Int` is the zero-based index of the output being parsed.
-  Output(Int)
+  AtOutput(Int)
 
   /// The error occurred while parsing witness data for a specific input.
   ///
   /// The wrapped `Int` is the zero-based index of the input whose witness
   /// stack was being parsed.
-  Witness(Int)
+  AtWitnessStack(Int)
+
+  /// The error occurred while parsing a specific item within a witness stack.
+  ///
+  /// The wrapped `Int` is the zero-based index of the witness item being parsed.
+  AtWitnessItem(Int)
 
   /// The error occurred while parsing or validating a specific logical field.
   ///
   /// This is typically used to label reads of fixed-size or length-prefixed
   /// fields such as `"version"`, `"sequence"`, `"lock_time"`, `"script_sig"`,
   /// or `"script_pubkey"`.
-  Field(String)
+  AtField(String)
 }
 
 pub fn parse_error_offset(err: ParseError) -> Int {
@@ -433,7 +457,7 @@ fn make_field_error(
   fn(kind) {
     kind
     |> new_parse_error(reader)
-    |> with_contexts([Field(field_name), ..ctx])
+    |> with_contexts([AtField(field_name), ..ctx])
     |> ParseFailed
   }
 }
@@ -483,7 +507,7 @@ fn read_field(
       err
       |> ReaderError
       |> new_parse_error(reader)
-      |> with_contexts([Field(field_name), ..ctx])
+      |> with_contexts([AtField(field_name), ..ctx])
       |> ParseFailed
     })
   }
@@ -498,9 +522,38 @@ fn read_compact_size(field_name: String) -> Parser(Uint64) {
       err
       |> CompactSizeError
       |> new_parse_error(reader)
-      |> with_contexts([Field(field_name), ..ctx])
+      |> with_contexts([AtField(field_name), ..ctx])
       |> ParseFailed
     })
+  }
+}
+
+/// Read a CompactSize value and convert it to `Int` with appropriate error handling.
+///
+/// This wraps `read_compact_size` and handles the common pattern of converting
+/// the `Uint64` result to `Int`, mapping conversion failures to `IntegerOutOfRange` errors.
+fn read_compact_size_as_int(field_name: String) -> Parser(Int) {
+  fn(reader, ctx) {
+    use reader, value_u64 <- run_parse(
+      reader,
+      ctx,
+      read_compact_size(field_name),
+    )
+
+    let field_err = make_field_error(field_name, reader, ctx)
+
+    use value_int <- result.try(
+      value_u64
+      |> uint64.to_int
+      |> result.map_error(fn(_) {
+        value_u64
+        |> uint64.to_string
+        |> IntegerOutOfRange
+        |> field_err
+      }),
+    )
+
+    Ok(#(reader, value_int))
   }
 }
 
@@ -556,7 +609,7 @@ pub fn decode_with_policy(
   policy: DecodePolicy,
 ) -> Result(Transaction, DecodeError) {
   let reader = reader.new(bytes)
-  let tx_ctx = [Tx]
+  let tx_ctx = [InTransaction]
 
   // version
   use reader, version <- run_parse(
@@ -593,11 +646,38 @@ pub fn decode_with_policy(
     outputs_ctx,
     read_tx_outs(vout_count, policy.max_script_size),
   )
+  // todo: validate that sum of outputs is not greater than 21_000_000 * 100_000_000
 
-  Ok(case is_segwit {
-    True -> Segwit(version:, inputs:, outputs:, lock_time: 0, witnesses: [])
-    False -> Legacy(version:, inputs:, outputs:, lock_time: 0)
-  })
+  case is_segwit {
+    True -> {
+      // witnesses
+      use reader, witnesses <- run_parse(
+        reader,
+        tx_ctx,
+        read_witness_stacks(vin_count),
+      )
+
+      // lock_time
+      use _, lock_time <- run_parse(
+        reader,
+        tx_ctx,
+        read_field("locktime", reader.read_u32_le),
+      )
+
+      Ok(Segwit(version:, inputs:, outputs:, lock_time:, witnesses:))
+    }
+
+    False -> {
+      // lock_time
+      use _, lock_time <- run_parse(
+        reader,
+        tx_ctx,
+        read_field("locktime", reader.read_u32_le),
+      )
+
+      Ok(Legacy(version:, inputs:, outputs:, lock_time:))
+    }
+  }
 }
 
 pub fn decode_hex(hex: String) -> Result(Transaction, DecodeError) {
@@ -649,7 +729,7 @@ fn peek_segwit() -> Parser(Bool) {
             err
             |> ReaderError
             |> new_parse_error(reader)
-            |> with_contexts([Field("segwit_discriminator"), ..ctx])
+            |> with_contexts([AtField("segwit_discriminator"), ..ctx])
             |> ParseFailed
             |> Error
         }
@@ -660,10 +740,10 @@ fn peek_segwit() -> Parser(Bool) {
 /// Validate and convert the vin_count from Uint64 to Int, checking structural and policy limits.
 fn read_and_validate_vin_count(max_vin_count_policy: Int) -> Parser(Int) {
   fn(reader, ctx) {
-    use reader, vin_count_u64 <- run_parse(
+    use reader, vin_count_int <- run_parse(
       reader,
       ctx,
-      read_compact_size("vin_count"),
+      read_compact_size_as_int("vin_count"),
     )
 
     let min_txin_size = 41
@@ -676,21 +756,9 @@ fn read_and_validate_vin_count(max_vin_count_policy: Int) -> Parser(Int) {
 
     let vin_count_err = make_field_error("vin_count", reader, ctx)
 
-    // Convert Uint64 -> Int, but distinguish "cannot represent" from "range invalid"
-    use vin_count_int <- result.try(
-      vin_count_u64
-      |> uint64.to_int
-      |> result.map_error(fn(_) {
-        vin_count_u64
-        |> uint64.to_string
-        |> IntegerOutOfRange
-        |> vin_count_err
-      }),
-    )
-
     // There aren't enough remaining bytes to parse even one input
     use <- bool.lazy_guard(remaining < min_txin_size, fn() {
-      InsufficientBytesForInputs(remaining:, min_txin_size:)
+      InsufficientBytes(remaining:, claimed: min_txin_size)
       |> vin_count_err
       |> Error
     })
@@ -721,7 +789,7 @@ fn read_tx_ins(
   // │    ├─ ...
   // └─ TxIn #(vin_count - 1)
   read_vec(vin_count, fn(index) {
-    in_context(Input(index), read_tx_in(max_script_size_policy))
+    in_context(AtInput(index), read_tx_in(max_script_size_policy))
   })
 }
 
@@ -779,10 +847,10 @@ fn read_prev_out() -> Parser(PrevOut) {
 /// Validate and convert the vout_count from Uint64 to Int, checking structural and policy limits.
 fn read_and_validate_vout_count(max_vout_count_policy: Int) -> Parser(Int) {
   fn(reader, ctx) {
-    use reader, vout_count_u64 <- run_parse(
+    use reader, vout_count_int <- run_parse(
       reader,
       ctx,
-      read_compact_size("vout_count"),
+      read_compact_size_as_int("vout_count"),
     )
 
     let min_txout_size = 9
@@ -795,21 +863,9 @@ fn read_and_validate_vout_count(max_vout_count_policy: Int) -> Parser(Int) {
 
     let vout_count_err = make_field_error("vout_count", reader, ctx)
 
-    // Convert Uint64 -> Int, but distinguish "cannot represent" from "range invalid"
-    use vout_count_int <- result.try(
-      vout_count_u64
-      |> uint64.to_int
-      |> result.map_error(fn(_) {
-        vout_count_u64
-        |> uint64.to_string
-        |> IntegerOutOfRange
-        |> vout_count_err
-      }),
-    )
-
     // There aren't enough remaining bytes to parse even one output
     use <- bool.lazy_guard(remaining < min_txout_size, fn() {
-      InsufficientBytesForOutputs(remaining:, min_txout_size:)
+      InsufficientBytes(remaining:, claimed: min_txout_size)
       |> vout_count_err
       |> Error
     })
@@ -843,7 +899,7 @@ fn read_tx_outs(
   // │    ├─ ...
   // └─ TxOut #(vout_count - 1)
   read_vec(vout_count, fn(index) {
-    in_context(Output(index), read_tx_out(max_script_size_policy))
+    in_context(AtOutput(index), read_tx_out(max_script_size_policy))
   })
 }
 
@@ -934,24 +990,13 @@ fn read_and_validate_script_length(
   max_script_size_policy: Int,
 ) -> Parser(Int) {
   fn(reader, ctx) {
-    let field_err = make_field_error(field_name, reader, ctx)
-
-    use reader, script_len <- run_parse(
+    use reader, script_len_int <- run_parse(
       reader,
       ctx,
-      read_compact_size(field_name),
+      read_compact_size_as_int(field_name),
     )
 
-    use script_len_int <- result.try(
-      script_len
-      |> uint64.to_int
-      |> result.map_error(fn(_) {
-        script_len
-        |> uint64.to_string
-        |> IntegerOutOfRange
-        |> field_err
-      }),
-    )
+    let field_err = make_field_error(field_name, reader, ctx)
 
     use <- bool.lazy_guard(script_len_int > max_script_size_policy, fn() {
       InvalidValueRange(
@@ -966,11 +1011,80 @@ fn read_and_validate_script_length(
 
     let remaining = reader.bytes_remaining(reader)
     use <- bool.lazy_guard(script_len_int > remaining, fn() {
-      InsufficientBytesForScript(claimed: script_len_int, remaining: remaining)
+      InsufficientBytes(claimed: script_len_int, remaining:)
       |> field_err
       |> Error
     })
 
     Ok(#(reader, script_len_int))
+  }
+}
+
+fn read_witness_stacks(vin_count: Int) -> Parser(List(WitnessStack)) {
+  read_vec(vin_count, fn(index) {
+    in_context(AtWitnessStack(index), read_witness_stack())
+  })
+}
+
+fn read_witness_stack() -> Parser(WitnessStack) {
+  // WitnessStack for one input:
+  // ├─ stack_len (CompactSize) - number of witness items
+  // ├─ WitnessItem #0
+  // │    ├─ item_len (CompactSize)
+  // │    └─ item bytes
+  // ├─ WitnessItem #1
+  // │    ├─ ...
+  // └─ WitnessItem #(stack_len - 1)
+  fn(reader, ctx) {
+    use reader, stack_len <- run_parse(
+      reader,
+      ctx,
+      read_compact_size_as_int("witnessStack_len"),
+    )
+    use reader, witness_items <- run_parse(
+      reader,
+      ctx,
+      read_vec(stack_len, fn(index) {
+        in_context(AtWitnessItem(index), read_witness_item())
+      }),
+    )
+
+    Ok(#(reader, WitnessStack(witness_items)))
+  }
+}
+
+fn read_witness_item() -> Parser(WitnessItem) {
+  fn(reader, ctx) {
+    use reader, length <- run_parse(
+      reader,
+      ctx,
+      read_and_validate_witness_item_length(),
+    )
+    use reader, item_bytes <- run_parse(
+      reader,
+      ctx,
+      read_field("witnessItem", reader.read_bytes(_, length)),
+    )
+
+    Ok(#(reader, WitnessItem(item_bytes)))
+  }
+}
+
+fn read_and_validate_witness_item_length() -> Parser(Int) {
+  fn(reader, ctx) {
+    use reader, length <- run_parse(
+      reader,
+      ctx,
+      read_compact_size_as_int("witnessItem_len"),
+    )
+
+    let remaining = reader.bytes_remaining(reader)
+    use <- bool.lazy_guard(length > remaining, fn() {
+      InsufficientBytes(claimed: length, remaining:)
+      |> make_field_error("witnessItem_len", reader, ctx)
+      |> Error
+    })
+
+    Ok(#(reader, length))
   }
 }

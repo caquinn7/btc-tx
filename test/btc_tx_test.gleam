@@ -1,9 +1,10 @@
 import btc_tx.{
-  CompactSizeError, DecodePolicy, Field, Input, Inputs,
-  InsufficientBytesForInputs, InsufficientBytesForScript, InvalidValueRange,
-  Output, Outputs, ParseFailed, ReaderError, Tx,
+  AtField, AtInput, AtOutput, AtWitnessItem, AtWitnessStack, CompactSizeError,
+  DecodePolicy, InTransaction, Inputs, InsufficientBytes, InvalidValueRange,
+  Outputs, ParseFailed, ReaderError,
 }
 import gleam/bit_array
+import gleam/list
 import gleam/option.{Some}
 import gleeunit
 import internal/compact_size
@@ -56,7 +57,8 @@ pub fn decode_errors_when_input_shorter_than_4_bytes_test() {
   assert btc_tx.parse_error_kind(parse_err)
     == ReaderError(reader.UnexpectedEof(4, 3))
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Field("version")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, AtField("version")]
 }
 
 pub fn decode_does_not_misclassify_segwit_when_discriminator_is_missing_test() {
@@ -67,7 +69,8 @@ pub fn decode_does_not_misclassify_segwit_when_discriminator_is_missing_test() {
   assert btc_tx.parse_error_kind(parse_err)
     == CompactSizeError(compact_size.ReaderError(reader.UnexpectedEof(1, 0)))
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Inputs, AtField("vin_count")]
 }
 
 pub fn decode_does_not_misclassify_segwit_when_discriminator_is_truncated_test() {
@@ -79,12 +82,10 @@ pub fn decode_does_not_misclassify_segwit_when_discriminator_is_truncated_test()
   assert btc_tx.parse_error_offset(parse_err) == 5
 
   assert btc_tx.parse_error_kind(parse_err)
-    == InsufficientBytesForInputs(
-      remaining: 0,
-      min_txin_size: min_txin_size_bytes,
-    )
+    == InsufficientBytes(remaining: 0, claimed: min_txin_size_bytes)
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Inputs, AtField("vin_count")]
 }
 
 pub fn decode_does_not_misclassify_segwit_when_flag_is_not_01_test() {
@@ -97,10 +98,7 @@ pub fn decode_does_not_misclassify_segwit_when_flag_is_not_01_test() {
   assert btc_tx.parse_error_offset(parse_err) == 5
 
   assert btc_tx.parse_error_kind(parse_err)
-    == InsufficientBytesForInputs(
-      remaining: 1,
-      min_txin_size: min_txin_size_bytes,
-    )
+    == InsufficientBytes(remaining: 1, claimed: min_txin_size_bytes)
 }
 
 // vin_count parsing and validation
@@ -125,7 +123,8 @@ pub fn decode_returns_invalid_value_range_when_vin_count_zero_test() {
   assert btc_tx.parse_error_kind(parse_err)
     == InvalidValueRange("vin_count", vin_count, Some(1), Some(1))
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Inputs, AtField("vin_count")]
 }
 
 pub fn validate_vin_count_minimum_succeeds_test() {
@@ -208,7 +207,8 @@ pub fn validate_vin_count_exceeds_policy_error_test() {
   assert btc_tx.parse_error_kind(parse_err)
     == InvalidValueRange("vin_count", vin_count, Some(1), Some(2))
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Inputs, AtField("vin_count")]
 }
 
 pub fn validate_vin_count_exceeds_structural_error_test() {
@@ -230,7 +230,8 @@ pub fn validate_vin_count_exceeds_structural_error_test() {
   assert btc_tx.parse_error_kind(parse_err)
     == InvalidValueRange("vin_count", vin_count, Some(1), Some(2))
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Inputs, AtField("vin_count")]
 }
 
 pub fn validate_vin_count_structural_boundary_succeeds_test() {
@@ -275,7 +276,8 @@ pub fn validate_vin_count_policy_wins_over_structural_test() {
   assert btc_tx.parse_error_kind(parse_err)
     == InvalidValueRange("vin_count", vin_count, Some(1), Some(10))
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Inputs, AtField("vin_count")]
 }
 
 // Two runtime-specific tests below. On JavaScript, `u64.to_int` fails for
@@ -317,7 +319,8 @@ pub fn validate_vin_count_uint_conversion_failure_js_test() {
   assert btc_tx.parse_error_kind(parse_err)
     == btc_tx.IntegerOutOfRange("18446744073709551615")
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Inputs, Field("vin_count")]
 }
 
 @target(erlang)
@@ -347,7 +350,8 @@ pub fn validate_vin_count_large_value_invalid_range_erlang_test() {
       Some(1),
     )
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Inputs, AtField("vin_count")]
 }
 
 pub fn validate_vin_count_insufficient_bytes_for_inputs_test() {
@@ -368,12 +372,13 @@ pub fn validate_vin_count_insufficient_bytes_for_inputs_test() {
   assert btc_tx.parse_error_offset(parse_err) == 5
 
   assert btc_tx.parse_error_kind(parse_err)
-    == InsufficientBytesForInputs(
+    == InsufficientBytes(
       remaining: min_txin_size_bytes - 1,
-      min_txin_size: min_txin_size_bytes,
+      claimed: min_txin_size_bytes,
     )
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Inputs, Field("vin_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Inputs, AtField("vin_count")]
 }
 
 // input structure parsing
@@ -598,7 +603,7 @@ pub fn decode_rejects_scriptsig_exceeding_max_size_test() {
     == InvalidValueRange("scriptSig_len", 10_001, Some(0), Some(10_000))
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [Tx, Inputs, Input(0), Field("scriptSig_len")]
+    == [InTransaction, Inputs, AtInput(0), AtField("scriptSig_len")]
 }
 
 pub fn decode_rejects_scriptsig_length_exceeds_remaining_bytes_test() {
@@ -628,10 +633,10 @@ pub fn decode_rejects_scriptsig_length_exceeds_remaining_bytes_test() {
     >>)
 
   assert btc_tx.parse_error_kind(parse_err)
-    == InsufficientBytesForScript(claimed: 100, remaining: 10)
+    == InsufficientBytes(claimed: 100, remaining: 10)
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [Tx, Inputs, Input(0), Field("scriptSig_len")]
+    == [InTransaction, Inputs, AtInput(0), AtField("scriptSig_len")]
 }
 
 pub fn decode_returns_error_with_current_input_index_test() {
@@ -666,10 +671,10 @@ pub fn decode_returns_error_with_current_input_index_test() {
 
   // Verify the error occurred in the second input (index 1)
   assert btc_tx.parse_error_kind(parse_err)
-    == InsufficientBytesForScript(claimed: 100, remaining: 4)
+    == InsufficientBytes(claimed: 100, remaining: 4)
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [Tx, Inputs, Input(1), Field("scriptSig_len")]
+    == [InTransaction, Inputs, AtInput(1), AtField("scriptSig_len")]
 }
 
 // vout_count parsing and validation
@@ -697,7 +702,8 @@ pub fn decode_returns_invalid_value_range_when_vout_count_zero_test() {
   assert btc_tx.parse_error_kind(parse_err)
     == InvalidValueRange("vout_count", vout_count, Some(1), Some(1))
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Outputs, Field("vout_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Outputs, AtField("vout_count")]
 }
 
 pub fn validate_vout_count_minimum_succeeds_test() {
@@ -786,7 +792,8 @@ pub fn validate_vout_count_exceeds_policy_error_test() {
   assert btc_tx.parse_error_kind(parse_err)
     == InvalidValueRange("vout_count", vout_count, Some(1), Some(2))
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Outputs, Field("vout_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Outputs, AtField("vout_count")]
 }
 
 pub fn validate_vout_count_structural_boundary_succeeds_test() {
@@ -832,12 +839,13 @@ pub fn validate_vout_count_insufficient_bytes_for_outputs_test() {
     >>)
 
   assert btc_tx.parse_error_kind(parse_err)
-    == btc_tx.InsufficientBytesForOutputs(
+    == btc_tx.InsufficientBytes(
       remaining: min_txout_size_bytes - 1,
-      min_txout_size: min_txout_size_bytes,
+      claimed: min_txout_size_bytes,
     )
 
-  assert btc_tx.parse_error_ctx(parse_err) == [Tx, Outputs, Field("vout_count")]
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, Outputs, AtField("vout_count")]
 }
 
 // output structure parsing
@@ -1032,7 +1040,7 @@ pub fn decode_rejects_output_value_negative_one_test() {
     == InvalidValueRange("value", -1, Some(0), Some(2_100_000_000_000_000))
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [Tx, Outputs, btc_tx.Output(0), Field("value")]
+    == [InTransaction, Outputs, btc_tx.AtOutput(0), AtField("value")]
 }
 
 @target(javascript)
@@ -1064,7 +1072,7 @@ pub fn decode_rejects_output_value_min_i64_js_test() {
     == btc_tx.IntegerOutOfRange("-9223372036854775808")
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [Tx, Outputs, btc_tx.Output(0), Field("value")]
+    == [InTransaction, Outputs, AtOutput(0), Field("value")]
 }
 
 @target(erlang)
@@ -1101,7 +1109,7 @@ pub fn decode_rejects_output_value_min_i64_erlang_test() {
     )
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [Tx, Outputs, btc_tx.Output(0), Field("value")]
+    == [InTransaction, Outputs, btc_tx.AtOutput(0), AtField("value")]
 }
 
 pub fn decode_rejects_output_value_exceeding_max_money_test() {
@@ -1131,7 +1139,7 @@ pub fn decode_rejects_output_value_exceeding_max_money_test() {
     )
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [Tx, Outputs, btc_tx.Output(0), Field("value")]
+    == [InTransaction, Outputs, btc_tx.AtOutput(0), AtField("value")]
 }
 
 // scriptPubKey validation
@@ -1158,7 +1166,7 @@ pub fn decode_rejects_scriptpubkey_exceeding_max_size_test() {
     == InvalidValueRange("scriptPubKey_len", 10_001, Some(0), Some(10_000))
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [Tx, Outputs, Output(0), Field("scriptPubKey_len")]
+    == [InTransaction, Outputs, AtOutput(0), AtField("scriptPubKey_len")]
 }
 
 pub fn decode_parses_scriptpubkey_at_max_size_test() {
@@ -1223,10 +1231,292 @@ pub fn validate_scriptpubkey_insufficient_bytes_error_test() {
     >>)
 
   assert btc_tx.parse_error_kind(parse_err)
-    == InsufficientBytesForScript(claimed: 100, remaining: 10)
+    == InsufficientBytes(claimed: 100, remaining: 10)
 
   assert btc_tx.parse_error_ctx(parse_err)
-    == [Tx, Outputs, Output(0), Field("scriptPubKey_len")]
+    == [InTransaction, Outputs, AtOutput(0), AtField("scriptPubKey_len")]
+}
+
+// witness data parsing
+
+pub fn decode_segwit_tx_parses_witness_data_test() {
+  // Use the real SegWit transaction constant
+  let assert Ok(tx) = btc_tx.decode_hex(segwit_v1_tx)
+
+  // Verify it's identified as a SegWit transaction
+  assert btc_tx.is_segwit(tx)
+
+  // Verify basic transaction properties
+  assert btc_tx.get_version(tx) == 1
+
+  // Verify inputs were parsed correctly (should have 1 input)
+  let inputs = btc_tx.get_inputs(tx)
+  let assert [_input] = inputs
+
+  // Verify outputs were parsed correctly (should have 2 outputs)
+  let outputs = btc_tx.get_outputs(tx)
+  let assert [_output1, _output2] = outputs
+
+  // Verify witness data was parsed
+  let assert Ok(witnesses) = btc_tx.get_witnesses(tx)
+  let assert [witness_stack] = witnesses
+
+  // Verify the witness stack has 2 items (likely signature and pubkey for P2WPKH)
+  let witness_items = btc_tx.get_witness_items(witness_stack)
+  let assert [item1, item2] = witness_items
+
+  // Verify the items are non-empty (actual signature and pubkey data)
+  assert bit_array.byte_size(btc_tx.get_witness_item_bytes(item1)) > 0
+  assert bit_array.byte_size(btc_tx.get_witness_item_bytes(item2)) > 0
+}
+
+// empty witness stacks valid b/c segWit txs can contain legacy inputs
+pub fn decode_segwit_tx_with_empty_witness_stacks_test() {
+  // Build inputs
+  let input1 = build_input(<<0:size(256)>>, 0, <<>>, 0)
+  let input2 = build_input(repeat_byte(1, 32), 1, <<0x01, 0x02>>, 0xFFFFFFFF)
+
+  // Build output
+  let output = build_output(<<1000:little-size(64)>>, <<0x76, 0xa9>>)
+
+  // Empty witness stacks: each input gets a witness stack with 0 items
+  let witness_stack1 = compact_size(0)
+  let witness_stack2 = compact_size(0)
+
+  let tx_bytes =
+    build_segwit_tx([input1, input2], [output], [witness_stack1, witness_stack2])
+
+  let assert Ok(tx) = btc_tx.decode(tx_bytes)
+
+  // Verify it's identified as SegWit
+  assert btc_tx.is_segwit(tx)
+
+  // Verify witness data exists
+  let assert Ok(witnesses) = btc_tx.get_witnesses(tx)
+  let assert [stack1, stack2] = witnesses
+
+  // Verify both stacks are empty
+  let items1 = btc_tx.get_witness_items(stack1)
+  let items2 = btc_tx.get_witness_items(stack2)
+
+  assert items1 == []
+  assert items2 == []
+}
+
+pub fn decode_witness_stack_with_multiple_items_test() {
+  // Build input
+  let input = build_input(<<0:size(256)>>, 0, <<>>, 0)
+
+  // Build output
+  let output = build_output(<<1000:little-size(64)>>, <<>>)
+
+  // Build witness items with different sizes
+  let witness_item1_data = <<0x48, 0x30, 0x45>>
+  let witness_item2_data = <<0x21, 0x02, 0x03>>
+  let witness_item3_data = <<0xAA, 0xBB, 0xCC, 0xDD>>
+
+  let witness_item1 = <<
+    compact_size(bit_array.byte_size(witness_item1_data)):bits,
+    witness_item1_data:bits,
+  >>
+  let witness_item2 = <<
+    compact_size(bit_array.byte_size(witness_item2_data)):bits,
+    witness_item2_data:bits,
+  >>
+  let witness_item3 = <<
+    compact_size(bit_array.byte_size(witness_item3_data)):bits,
+    witness_item3_data:bits,
+  >>
+
+  let witness_stack = <<
+    compact_size(3):bits,
+    witness_item1:bits,
+    witness_item2:bits,
+    witness_item3:bits,
+  >>
+
+  let tx_bytes = build_segwit_tx([input], [output], [witness_stack])
+
+  let assert Ok(tx) = btc_tx.decode(tx_bytes)
+
+  // Verify it's SegWit
+  assert btc_tx.is_segwit(tx)
+
+  // Get the witness stack
+  let assert Ok(witnesses) = btc_tx.get_witnesses(tx)
+  let assert [stack] = witnesses
+
+  // Verify it has 3 items
+  let items = btc_tx.get_witness_items(stack)
+  let assert [item1, item2, item3] = items
+
+  // Verify each item has the correct data
+  let data1 = btc_tx.get_witness_item_bytes(item1)
+  let data2 = btc_tx.get_witness_item_bytes(item2)
+  let data3 = btc_tx.get_witness_item_bytes(item3)
+
+  assert data1 == witness_item1_data
+  assert data2 == witness_item2_data
+  assert data3 == witness_item3_data
+}
+
+pub fn decode_witness_item_with_zero_length_test() {
+  // Build input
+  let input = build_input(<<0:size(256)>>, 0, <<>>, 0)
+
+  // Build output
+  let output = build_output(<<1000:little-size(64)>>, <<>>)
+
+  // Build a witness stack with a single zero-length item
+  let witness_stack = <<
+    compact_size(1):bits,
+    compact_size(0):bits,
+  >>
+
+  let tx_bytes = build_segwit_tx([input], [output], [witness_stack])
+
+  let assert Ok(tx) = btc_tx.decode(tx_bytes)
+
+  // Verify it's SegWit
+  assert btc_tx.is_segwit(tx)
+
+  // Get the witness stack
+  let assert Ok(witnesses) = btc_tx.get_witnesses(tx)
+  let assert [stack] = witnesses
+
+  // Verify it has 1 item
+  let items = btc_tx.get_witness_items(stack)
+  let assert [item] = items
+
+  // Verify the item is zero-length
+  let data = btc_tx.get_witness_item_bytes(item)
+  assert bit_array.byte_size(data) == 0
+}
+
+pub fn decode_witness_item_length_exceeds_remaining_bytes_test() {
+  // Build input
+  let input = build_input(<<0:size(256)>>, 0, <<>>, 0)
+
+  // Build output
+  let output = build_output(<<1000:little-size(64)>>, <<>>)
+
+  // Build witness stack where item length exceeds remaining bytes
+  // Claim 100 bytes for the item but only provide 10 bytes of data
+  let witness_item_data = <<1, 2, 3, 4, 5, 6, 7, 8, 9, 10>>
+  let witness_stack = <<
+    compact_size(1):bits,
+    compact_size(100):bits,
+    witness_item_data:bits,
+  >>
+
+  let tx_bytes = build_segwit_tx([input], [output], [witness_stack])
+
+  // Decode should fail with InsufficientBytes error
+  let assert Error(ParseFailed(parse_err)) = btc_tx.decode(tx_bytes)
+
+  // Verify the error kind indicates insufficient bytes
+  // The compact_size encoding of 100 takes 3 bytes (0xFD + 2 bytes),
+  // so remaining = 10 data bytes + 4 bytes overhead = 14
+  assert btc_tx.parse_error_kind(parse_err)
+    == InsufficientBytes(claimed: 100, remaining: 14)
+
+  // Verify the error context indicates we're in witness item length parsing
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [
+      InTransaction,
+      AtWitnessStack(0),
+      AtWitnessItem(0),
+      AtField("witnessItem_len"),
+    ]
+}
+
+pub fn decode_witness_invalid_compact_size_in_stack_length_test() {
+  // Build input and output normally
+  let input = build_input(<<0:size(256)>>, 0, <<>>, 0)
+  let output = build_output(<<1000:little-size(64)>>, <<>>)
+
+  // Manually construct transaction with invalid CompactSize in witness stack length
+  // CompactSize 0xFD requires 2 bytes following, but provide only 1 (truncated)
+  let marker = <<0x00>>
+  let flag = <<0x01>>
+  let vin_count = compact_size(1)
+  let vout_count = compact_size(1)
+  let lock_time = <<0:little-size(32)>>
+
+  // Invalid witness stack: 0xFD followed by only 1 byte (truncated CompactSize)
+  let invalid_witness_stack = <<0xFD, 0x01>>
+
+  let tx_bytes = <<
+    version1:bits,
+    marker:bits,
+    flag:bits,
+    vin_count:bits,
+    input:bits,
+    vout_count:bits,
+    output:bits,
+    invalid_witness_stack:bits,
+    lock_time:bits,
+  >>
+
+  // Decode should fail with CompactSizeError
+  let assert Error(ParseFailed(parse_err)) = btc_tx.decode(tx_bytes)
+
+  // Verify the error is a CompactSizeError
+  assert btc_tx.parse_error_kind(parse_err)
+    == CompactSizeError(compact_size.NonMinimalCompactSize(3, 1))
+
+  // Verify the error context indicates we're in witness stack count parsing
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [InTransaction, AtWitnessStack(0), AtField("witnessStack_len")]
+}
+
+pub fn decode_witness_invalid_compact_size_in_item_length_test() {
+  // Build input and output normally
+  let input = build_input(<<0:size(256)>>, 0, <<>>, 0)
+  let output = build_output(<<1000:little-size(64)>>, <<>>)
+
+  // Manually construct transaction with invalid CompactSize in witness item length
+  let marker = <<0x00>>
+  let flag = <<0x01>>
+  let vin_count = compact_size(1)
+  let vout_count = compact_size(1)
+  let lock_time = <<0:little-size(32)>>
+
+  // Valid witness stack count (1 item), but invalid item length CompactSize
+  // 0xFD requires 2 bytes following, but provide only 1 (truncated)
+  let invalid_witness_stack = <<
+    compact_size(1):bits,
+    0xFD,
+    0x01,
+  >>
+
+  let tx_bytes = <<
+    version1:bits,
+    marker:bits,
+    flag:bits,
+    vin_count:bits,
+    input:bits,
+    vout_count:bits,
+    output:bits,
+    invalid_witness_stack:bits,
+    lock_time:bits,
+  >>
+
+  // Decode should fail with CompactSizeError
+  let assert Error(ParseFailed(parse_err)) = btc_tx.decode(tx_bytes)
+
+  // Verify the error is a CompactSizeError
+  assert btc_tx.parse_error_kind(parse_err)
+    == CompactSizeError(compact_size.NonMinimalCompactSize(3, 1))
+
+  // Verify the error context indicates we're in witness item length parsing
+  assert btc_tx.parse_error_ctx(parse_err)
+    == [
+      InTransaction,
+      AtWitnessStack(0),
+      AtWitnessItem(0),
+      AtField("witnessItem_len"),
+    ]
 }
 
 // helpers
@@ -1282,6 +1572,34 @@ fn build_minimal_output() -> BitArray {
     vout_count:bits,
     value:bits,
     script_pubkey_len:bits,
+  >>
+}
+
+/// Build a complete SegWit transaction from inputs, outputs, and witness stacks.
+///
+/// Constructs a valid SegWit transaction with the given components, handling
+/// the marker/flag bytes and proper byte concatenation.
+fn build_segwit_tx(
+  inputs: List(BitArray),
+  outputs: List(BitArray),
+  witness_stacks: List(BitArray),
+) -> BitArray {
+  let marker = <<0x00>>
+  let flag = <<0x01>>
+  let vin_count = compact_size(list.length(inputs))
+  let vout_count = compact_size(list.length(outputs))
+  let lock_time = <<0:little-size(32)>>
+
+  <<
+    version1:bits,
+    marker:bits,
+    flag:bits,
+    vin_count:bits,
+    bit_array.concat(inputs):bits,
+    vout_count:bits,
+    bit_array.concat(outputs):bits,
+    bit_array.concat(witness_stacks):bits,
+    lock_time:bits,
   >>
 }
 
